@@ -18,12 +18,26 @@ android {
         versionName "0.3.1"
     }
 
+    final Console console = System.console();
     signingConfigs {
-        release {
-            storeFile file(project.hasProperty("RELEASE_STORE_FILE") ? RELEASE_STORE_FILE : "/dummy/path")
-            storePassword project.hasProperty("RELEASE_STORE_PASSWORD") ? RELEASE_STORE_PASSWORD : "dummy password"
-            keyAlias project.hasProperty("RELEASE_KEY_ALIAS") ? RELEASE_KEY_ALIAS : "dummy alias"
-            keyPassword project.hasProperty("RELEASE_KEY_PASSWORD") ? RELEASE_KEY_PASSWORD : "dummy password"
+        releaseSigning {
+            storeFile file(System.getenv("ANDROID_KEYSTORE"))
+            keyAlias System.getenv("ANDROID_KEYALIAS")
+            storePassword "FakePassword"
+            keyPassword "FakePassword"
+        }
+    }
+
+    task checkPasswords << {
+        def keyStorePass = new String(console.readPassword("\nKeystore password: "))
+        def keyPass  = new String(console.readPassword("Key password: "))
+        android.signingConfigs.releaseSigning.storePassword = keyStorePass
+        android.signingConfigs.releaseSigning.keyPassword = keyPass
+    }
+
+    tasks.whenTaskAdded { theTask ->
+        if (theTask.name.equals("packageAlphaRelease")) {
+            theTask.dependsOn "checkPasswords"
         }
     }
 
@@ -42,11 +56,12 @@ android {
             shrinkResources true
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.releaseSigning
         }
 
         matrixorg.initWith(buildTypes.release)
         matrixorg {
-            signingConfig signingConfigs.release
+            signingConfig signingConfigs.releaseSigning
         }
     }
 
