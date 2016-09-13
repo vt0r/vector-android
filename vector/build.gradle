@@ -37,7 +37,7 @@ android {
     }
 
     tasks.whenTaskAdded { theTask ->
-        if (theTask.name.equals("packageAlphaRelease")) {
+        if (theTask.name.equals("packageAppRelease")) {
             theTask.dependsOn "checkPasswords"
         }
     }
