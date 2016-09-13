@@ -23,6 +23,7 @@ import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
 import android.net.ConnectivityManager;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.util.Log;
 
 import org.matrix.androidsdk.HomeserverConnectionConfig;
@@ -33,14 +34,17 @@ import org.matrix.androidsdk.call.MXCallsManager;
 import org.matrix.androidsdk.data.IMXStore;
 import org.matrix.androidsdk.data.MXFileStore;
 import org.matrix.androidsdk.data.MXMemoryStore;
+import org.matrix.androidsdk.data.Room;
+import org.matrix.androidsdk.data.RoomState;
 import org.matrix.androidsdk.db.MXLatestChatMessageCache;
 import org.matrix.androidsdk.db.MXMediasCache;
 import org.matrix.androidsdk.listeners.IMXNetworkEventListener;
 import org.matrix.androidsdk.listeners.MXEventListener;
 import org.matrix.androidsdk.network.NetworkConnectivityReceiver;
+import org.matrix.androidsdk.rest.model.Event;
 import org.matrix.androidsdk.rest.model.login.Credentials;
 
-import im.vector.activity.CallViewActivity;
+import im.vector.activity.VectorCallViewActivity;
 import im.vector.activity.CommonActivityUtils;
 import im.vector.activity.SplashActivity;
 import im.vector.activity.VectorHomeActivity;
@@ -51,8 +55,6 @@ import im.vector.util.RageShake;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Vector;
-import java.util.logging.Handler;
 
 /**
  * Singleton to control access to the Matrix SDK and providing point of control for MXSessions.
@@ -74,7 +76,7 @@ public class Matrix {
     private ArrayList<MXSession> mMXSessions;
 
     // GCM registration manager
-    private GcmRegistrationManager mGcmRegistrationManager;
+    private GcmRegistrationManager mGCMRegistrationManager;
 
     // list of store : some sessions or activities use tmp stores
     // provide an storage to exchange them
@@ -82,9 +84,6 @@ public class Matrix {
 
     // tell if the client should be logged out
     public boolean mHasBeenDisconnected = false;
-
-    // network event manager
-    private NetworkConnectivityReceiver mNetworkConnectivityReceiver;
 
     // i.e the event has been read from another client
     private static final MXEventListener mLiveEventListener = new MXEventListener() {
@@ -95,8 +94,46 @@ public class Matrix {
             VectorHomeActivity.mClearCacheRequired = true;
         }
 
+        private boolean mRefreshUnreadCounter = false;
+
+        @Override
+        public void onLiveEvent(Event event, RoomState roomState) {
+            mRefreshUnreadCounter |=  Event.EVENT_TYPE_MESSAGE.equals(event.type) || Event.EVENT_TYPE_RECEIPT.equals(event.type);
+        }
+
         @Override
         public void onLiveEventsChunkProcessed() {
+            // when the client does not use GCM
+            // we need to compute the application badge values
+
+            if ((null != instance) && (null != instance.mMXSessions) && mRefreshUnreadCounter) {
+                GcmRegistrationManager gcmMgr = instance.getSharedGCMRegistrationManager();
+
+                // check if the GCM is not available
+                if ((null != gcmMgr) && (!gcmMgr.useGCM() || !gcmMgr.hasRegistrationToken())) {
+                    int unreadCount = 0;
+
+                    for(MXSession session :  instance.mMXSessions) {
+                        if (session.isAlive()) {
+                            Collection<Room> rooms = session.getDataHandler().getStore().getRooms();
+
+                            if (null != rooms) {
+                                for(Room room : rooms) {
+                                    if ((0 != room.getNotificationCount()) || (0 != room.getHighlightCount())) {
+                                        unreadCount++;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // update the badge counter
+                    CommonActivityUtils.updateBadgeCount(instance.mAppContext, unreadCount);
+                }
+            }
+
+            mRefreshUnreadCounter = false;
+
             Log.d(LOG_TAG, "onLiveEventsChunkProcessed ");
             EventStreamService.checkDisplayedNotification();
         }
@@ -127,7 +164,7 @@ public class Matrix {
                     @Override
                     public void run() {
                         // can only manage one call instance.
-                        if (null == CallViewActivity.getActiveCall()) {
+                        if (null == VectorCallViewActivity.getActiveCall()) {
                             Log.d(LOG_TAG, "onIncomingCall with no active call");
 
                             VectorHomeActivity homeActivity = VectorHomeActivity.getInstance();
@@ -145,8 +182,8 @@ public class Matrix {
                                 intent.putExtra(VectorHomeActivity.EXTRA_CALL_ID, call.getCallId());
                                 context.startActivity(intent);
                             } else {
-                                Log.d(LOG_TAG, "onIncomingCall : the home activity exists : use it");
-                                // the home activity does the job
+                                Log.d(LOG_TAG, "onIncomingCall : the home activity exists : but permissions have to be checked before");
+                                // check incoming call required permissions, before allowing the call..
                                 homeActivity.startCall(call.getSession().getMyUserId(), call.getCallId());
                             }
                         } else {
@@ -179,19 +216,28 @@ public class Matrix {
                 Log.d(LOG_TAG, "onCallHangUp : homeactivity does not exist -> don't know what to do");
             }
         }
+
+
+        @Override
+        public void onVoipConferenceStarted(String roomId) {
+
+        }
+
+        @Override
+        public void onVoipConferenceFinished(String roomId) {
+        }
     };
 
     // constructor
     protected Matrix(Context appContext) {
+        instance = this;
+
         mAppContext = appContext.getApplicationContext();
         mLoginStorage = new LoginStorage(mAppContext);
-        mMXSessions = new ArrayList<MXSession>();
-        mTmpStores = new ArrayList<IMXStore>();
-        mGcmRegistrationManager = new GcmRegistrationManager(mAppContext);
-        RageShake.getInstance().start(mAppContext);
+        mMXSessions = new ArrayList<>();
+        mTmpStores = new ArrayList<>();
 
-        mNetworkConnectivityReceiver = new NetworkConnectivityReceiver();
-        appContext.registerReceiver(mNetworkConnectivityReceiver, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
+        mGCMRegistrationManager = new GcmRegistrationManager(mAppContext);
     }
 
     /**
@@ -222,6 +268,12 @@ public class Matrix {
         try {
             PackageInfo pInfo = mAppContext.getPackageManager().getPackageInfo(mAppContext.getPackageName(), 0);
             versionName = pInfo.versionName;
+
+            String flavor = mAppContext.getResources().getString(R.string.flavor_description);
+
+            if (!TextUtils.isEmpty(flavor)) {
+                versionName += " (" + flavor +")";
+            }
         } catch (Exception e) {
         }
 
@@ -496,7 +548,7 @@ public class Matrix {
         if (true) {
             store = new MXFileStore(hsConfig, context);
         } else {
-            store = new MXMemoryStore(hsConfig.getCredentials());
+            store = new MXMemoryStore(hsConfig.getCredentials(), context);
         }
 
         MXSession session = new MXSession(hsConfig, new MXDataHandler(store, credentials, new MXDataHandler.InvalidTokenListener() {
@@ -545,8 +597,11 @@ public class Matrix {
         fromActivity.finish();
     }
 
-    public GcmRegistrationManager getSharedGcmRegistrationManager() {
-        return mGcmRegistrationManager;
+    /**
+     * @return the GCM registration manager
+     */
+    public GcmRegistrationManager getSharedGCMRegistrationManager() {
+        return mGCMRegistrationManager;
     }
 
     //==============================================================================================================
@@ -579,8 +634,8 @@ public class Matrix {
      * @param networkEventListener the event listener to add
      */
     public void addNetworkEventListener(final IMXNetworkEventListener networkEventListener) {
-        if ((null != mNetworkConnectivityReceiver) && (null != networkEventListener)) {
-            mNetworkConnectivityReceiver.addEventListener(networkEventListener);
+        if ((null != getDefaultSession()) && (null != networkEventListener)){
+           getDefaultSession().getNetworkConnectivityReceiver().addEventListener(networkEventListener);
         }
     }
 
@@ -589,8 +644,8 @@ public class Matrix {
      * @param networkEventListener the event listener to remove
      */
     public void removeNetworkEventListener(final IMXNetworkEventListener networkEventListener) {
-        if ((null != mNetworkConnectivityReceiver) && (null != networkEventListener)) {
-            mNetworkConnectivityReceiver.removeEventListener(networkEventListener);
+        if ((null != getDefaultSession()) && (null != networkEventListener)){
+            getDefaultSession().getNetworkConnectivityReceiver().removeEventListener(networkEventListener);
         }
     }
 
@@ -598,7 +653,11 @@ public class Matrix {
      * @return true if the device is connected to a data network
      */
     public boolean isConnected() {
-        return mNetworkConnectivityReceiver.isConnected();
+        if (null != getDefaultSession()) {
+            return getDefaultSession().getNetworkConnectivityReceiver().isConnected();
+        }
+
+        return true;
     }
 
     //==============================================================================================================

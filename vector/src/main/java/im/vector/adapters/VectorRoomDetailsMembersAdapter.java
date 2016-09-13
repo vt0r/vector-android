@@ -36,7 +36,6 @@ import android.widget.Toast;
 import org.matrix.androidsdk.MXSession;
 import org.matrix.androidsdk.data.Room;
 import org.matrix.androidsdk.db.MXMediasCache;
-import org.matrix.androidsdk.rest.callback.SimpleApiCallback;
 import org.matrix.androidsdk.rest.model.PowerLevels;
 import org.matrix.androidsdk.rest.model.RoomMember;
 import org.matrix.androidsdk.rest.model.RoomThirdPartyInvite;
@@ -47,7 +46,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 
-import im.vector.Matrix;
 import im.vector.R;
 import im.vector.activity.CommonActivityUtils;
 import im.vector.util.VectorUtils;
@@ -100,12 +98,10 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
     private final String LOG_TAG ="VectorRoomDlsMemAdapt";
     private final Context mContext;
     private final LayoutInflater mLayoutInflater;
-    private final MXMediasCache mMediasCache;
 
     private View mSwipingCellView;
 
     private final MXSession mSession;
-    private String mRoomId;
     private Room mRoom;
     private final int mChildLayoutResourceId;
     private final int mGroupLayoutResourceId;
@@ -125,7 +121,6 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
 
     //ParticipantAdapterItem mFirstEntry;
     private OnParticipantsListener mOnParticipantsListener;
-
 
     /**
      * Recycle view holder class.
@@ -181,10 +176,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
         mLayoutInflater = LayoutInflater.from(aContext);
         mChildLayoutResourceId = aChildLayoutResourceId;// R.layout.adapter_item_vector_add_participants
         mGroupLayoutResourceId = aGroupHeaderLayoutResourceId; // R.layout.adapter_item_vector_recent_header
-        mMediasCache = aMediasCache;
         mSession = aSession;
-
-        mRoomId = aRoomId;
         mRoom = mSession.getDataHandler().getRoom(aRoomId);
 
         // display check box to select multiple items
@@ -257,7 +249,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
      * Test if the adapter data model is filtered with the search pattern.
      * @return true if search mode is enabled, false otherwise
      */
-    public boolean isSearchModeEnabled() {
+    private boolean isSearchModeEnabled() {
         return (!TextUtils.isEmpty(mSearchPattern));
     }
 
@@ -281,7 +273,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
      * Update the data model of the adapter which is based on a set of ParticipantAdapterItem objects.
      * @param aSearchListener search events listener, set to null if search not enabled
      */
-    private void updateRoomMembersDataModel(final OnRoomMembersSearchListener aSearchListener) {
+    public void updateRoomMembersDataModel(final OnRoomMembersSearchListener aSearchListener) {
         if (!mSession.isAlive()) {
             Log.e(LOG_TAG, "updateRoomMembersDataModel the session is not anymore valid");
             return;
@@ -321,7 +313,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
             participantItem = new ParticipantAdapterItem(member);
 
             // if search is enabled, just skipp the member if pattern does not match
-            if(isSearchEnabled && (!participantItem.matchWithPattern(mSearchPattern))){
+            if(isSearchEnabled && (!participantItem.contains(mSearchPattern))){
                 continue;
             }
 
@@ -351,7 +343,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
             if (null == mRoom.getLiveState().memberWithThirdPartyInviteToken(invite.token)) {
                 ParticipantAdapterItem participant =  new ParticipantAdapterItem(invite.display_name, "", null);
 
-                if ((!isSearchEnabled) || participant.matchWithPattern(mSearchPattern)) {
+                if ((!isSearchEnabled) || participant.contains(mSearchPattern)) {
                     invitedMembers.add(participant);
                 }
             }
@@ -401,7 +393,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
                     if (powerLevelA == powerLevelB) {
                         return alphaComparator(userADisplayName, userBDisplayName);
                     } else {
-                        return powerLevelB - powerLevelA;
+                        return (powerLevelB - powerLevelA) > 0 ? +1 : -1;
                     }
                 }
 
@@ -412,13 +404,20 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
                 }
 
                 // Finally, compare the timestamps
-                long lastActiveAgoA = (null != userA) && (null != userA.lastActiveAgo) ? userA.getRealLastActiveAgo() : 0;
-                long lastActiveAgoB = (null != userB) && (null != userB.lastActiveAgo) ? userB.getRealLastActiveAgo() : 0;
+                long lastActiveAgoA = (null != userA) ? userA.getAbsoluteLastActiveAgo() : 0;
+                long lastActiveAgoB = (null != userB) ? userB.getAbsoluteLastActiveAgo() : 0;
 
                 long diff = lastActiveAgoA - lastActiveAgoB;
 
                 if (diff == 0) {
                     return alphaComparator(userADisplayName, userBDisplayName);
+                }
+
+                // if only one member has a lastActiveAgo, prefer it
+                if (0 == lastActiveAgoA) {
+                    return +1;
+                } else if (0 == lastActiveAgoB) {
+                    return -1;
                 }
 
                 return (diff > 0) ? +1 : -1;
@@ -459,7 +458,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
     public ArrayList<String> getUserIdsList() {
         ArrayList<String> idsListRetValue = new ArrayList<String>();
 
-        if(mGroupIndexPresentMembers >= 0) {
+        if (mGroupIndexPresentMembers >= 0) {
             int listSize = mRoomMembersListByGroupPosition.get(mGroupIndexPresentMembers).size();
 
             // the first item is always oneself, so skipp first element
@@ -683,12 +682,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
             }
         }
         // 3 - display member status
-        viewHolder.mMemberStatusTextView.setText(VectorUtils.getUserOnlineStatus(mContext, mSession, participant.mUserId,new SimpleApiCallback<Void>() {
-            @Override
-            public void onSuccess(Void info) {
-                // do nothing because the members are sorted by presence.
-            }
-        }));
+        viewHolder.mMemberStatusTextView.setText(VectorUtils.getUserOnlineStatus(mContext, mSession, participant.mUserId, null));
 
         // add "remove member from room" action
         viewHolder.mDeleteActionsView.setOnClickListener(new View.OnClickListener() {
@@ -763,11 +757,7 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
         View.OnLongClickListener onLongClickListener = new View.OnLongClickListener() {
             @Override
             public boolean onLongClick(View v) {
-                ClipboardManager clipboard = (ClipboardManager) mContext.getSystemService(Context.CLIPBOARD_SERVICE);
-                ClipData clip = ClipData.newPlainText("", viewHolder.mMemberNameTextView.getText());
-                clipboard.setPrimaryClip(clip);
-                Toast.makeText(mContext, mContext.getResources().getString(R.string.copied_to_clipboard), Toast.LENGTH_SHORT).show();
-
+                VectorUtils.copyToClipboard(mContext, viewHolder.mMemberNameTextView.getText());
                 return true;
             }
         };
@@ -817,14 +807,16 @@ public class VectorRoomDetailsMembersAdapter extends BaseExpandableListAdapter {
                             float x = event.getX() + v.getTranslationX();
 
                             // assume it is a tap
-                            if (Math.abs(x - mStartX) < 3) {
-                                if (null != mOnParticipantsListener) {
-                                    mOnParticipantsListener.onClick(participant);
+                            if (Math.abs(x - mStartX) < 10) {
+                                // ignore the cancel event
+                                if (event.getAction() == MotionEvent.ACTION_UP) {
+                                    if (null != mOnParticipantsListener) {
+                                        mOnParticipantsListener.onClick(participant);
+                                    }
                                 }
                                 isMotionTrapped = false;
                             } else {
                                 float deltaX = -Math.max(Math.min(x - mStartX, 0), -hiddenViewWidth);
-
 
                                 if (deltaX > (hiddenViewWidth / 2)) {
                                     viewHolder.mSwipeCellLayout.setTranslationX(-hiddenViewWidth);

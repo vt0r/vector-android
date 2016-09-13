@@ -16,11 +16,13 @@
 
 package im.vector.activity;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.DownloadManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
@@ -28,27 +30,27 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.res.Resources;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Parcelable;
 import android.preference.PreferenceManager;
-import android.support.annotation.BoolRes;
 import android.support.design.widget.Snackbar;
+import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.FragmentActivity;
 import android.support.v4.app.FragmentManager;
-import android.text.TextUtils;
+import android.support.v4.content.ContextCompat;
 import android.util.Log;
 import android.view.View;
-import android.widget.ArrayAdapter;
-import android.widget.EditText;
 import android.widget.Toast;
 
-import org.matrix.androidsdk.MXDataHandler;
 import org.matrix.androidsdk.MXSession;
+import org.matrix.androidsdk.call.IMXCall;
+import org.matrix.androidsdk.data.IMXStore;
 import org.matrix.androidsdk.data.Room;
 import org.matrix.androidsdk.data.RoomPreviewData;
-import org.matrix.androidsdk.data.RoomState;
 import org.matrix.androidsdk.data.RoomSummary;
 import org.matrix.androidsdk.db.MXMediasCache;
 import org.matrix.androidsdk.rest.callback.ApiCallback;
@@ -60,13 +62,12 @@ import im.vector.VectorApp;
 import im.vector.Matrix;
 import im.vector.MyPresenceManager;
 import im.vector.R;
-import im.vector.adapters.VectorPublicRoomsAdapter;
 import im.vector.adapters.VectorRoomsSelectionAdapter;
 import im.vector.contacts.ContactsManager;
 import im.vector.contacts.PIDsRetriever;
 import im.vector.fragments.AccountsSelectionDialogFragment;
+import im.vector.ga.GAHelper;
 import im.vector.services.EventStreamService;
-import im.vector.util.RageShake;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -79,7 +80,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
 import im.vector.util.VectorUtils;
 import me.leolin.shortcutbadger.ShortcutBadger;
@@ -93,14 +93,16 @@ public class CommonActivityUtils {
     /**
      * Mime types
      **/
+    public static final String MIME_TYPE_JPEG = "image/jpeg";
+    public static final String MIME_TYPE_JPG =  "image/jpg";
     public static final String MIME_TYPE_IMAGE_ALL = "image/*";
     public static final String MIME_TYPE_ALL_CONTENT = "*/*";
 
     /**
      * Schemes
      */
-    public static final String HTTP_SCHEME = "http://";
-    public static final String HTTPS_SCHEME = "https://";
+    private static final String HTTP_SCHEME = "http://";
+    private static final String HTTPS_SCHEME = "https://";
 
     // global helper constants:
     /**
@@ -128,12 +130,27 @@ public class CommonActivityUtils {
     // power levels
     public static final float UTILS_POWER_LEVEL_ADMIN = 100;
     public static final float UTILS_POWER_LEVEL_MODERATOR = 50;
+    private static final int ROOM_SIZE_ONE_TO_ONE = 2;
+
+    // Android M permission request code management
+    private static final boolean PERMISSIONS_GRANTED = true;
+    private static final boolean PERMISSIONS_DENIED = !PERMISSIONS_GRANTED;
+    private static final int PERMISSION_CAMERA = 0x1;
+    private static final int PERMISSION_WRITE_EXTERNAL_STORAGE = 0x1<<1;
+    private static final int PERMISSION_RECORD_AUDIO = 0x1<<2;
+    private static final int PERMISSION_READ_CONTACTS = 0x1<<3;
+    public static final int REQUEST_CODE_PERMISSION_AUDIO_IP_CALL = PERMISSION_RECORD_AUDIO;
+    public static final int REQUEST_CODE_PERMISSION_VIDEO_IP_CALL = PERMISSION_CAMERA | PERMISSION_RECORD_AUDIO;
+    public static final int REQUEST_CODE_PERMISSION_TAKE_PHOTO = PERMISSION_CAMERA | PERMISSION_WRITE_EXTERNAL_STORAGE;
+    public static final int REQUEST_CODE_PERMISSION_MEMBERS_SEARCH = PERMISSION_READ_CONTACTS;
+    public static final int REQUEST_CODE_PERMISSION_MEMBER_DETAILS = PERMISSION_READ_CONTACTS;
+    public static final int REQUEST_CODE_PERMISSION_HOME_ACTIVITY = PERMISSION_WRITE_EXTERNAL_STORAGE;
 
     public static void logout(Activity activity, MXSession session, Boolean clearCredentials) {
         if (session.isAlive()) {
             // stop the service
             EventStreamService eventStreamService = EventStreamService.getInstance();
-            ArrayList<String> matrixIds = new ArrayList<String>();
+            ArrayList<String> matrixIds = new ArrayList<>();
             matrixIds.add(session.getMyUserId());
             eventStreamService.stopAccounts(matrixIds);
 
@@ -145,7 +162,7 @@ public class CommonActivityUtils {
             EventStreamService.removeNotification();
 
             // unregister from the GCM.
-            Matrix.getInstance(activity).getSharedGcmRegistrationManager().unregisterSession(session, null);
+            Matrix.getInstance(activity).getSharedGCMRegistrationManager().unregister(session, null);
 
             // clear credentials
             Matrix.getInstance(activity).clearSession(activity, session, clearCredentials);
@@ -167,7 +184,54 @@ public class CommonActivityUtils {
         return !Matrix.hasValidSessions();
     }
 
-    public static final String RESTART_IN_PROGRESS_KEY = "RESTART_IN_PROGRESS_KEY";
+    /**
+     * With android M, the permissions kills the backgrounded application
+     * and try to restart the last opened activity.
+     * But, the sessions are not initialised (i.e the stores are not ready and so on).
+     * Thus, the activity could have an invalid behaviour.
+     * It seems safer to go to splash screen and to wait for the end of the initialisation.
+     * @param activity the caller activity
+     * @return true if go to splash screen
+     */
+    public static boolean isGoingToSplash(Activity activity) {
+        return isGoingToSplash(activity, null, null);
+    }
+
+    /**
+     * With android M, the permissions kills the backgrounded application
+     * and try to restart the last opened activity.
+     * But, the sessions are not initialised (i.e the stores are not ready and so on).
+     * Thus, the activity could have an invalid behaviour.
+     * It seems safer to go to splash screen and to wait for the end of the initialisation.
+     * @param activity the caller activity
+     * @param sessionId the session id
+     * @param roomId the room id
+     * @return true if go to splash screen
+     */
+    public static boolean isGoingToSplash(Activity activity, String sessionId, String roomId) {
+        if (Matrix.hasValidSessions()) {
+            List<MXSession> sessions = Matrix.getInstance(activity).getSessions();
+
+            for(MXSession session : sessions) {
+                if (session.isAlive() && !session.getDataHandler().getStore().isReady()) {
+                    Intent intent = new Intent(activity, SplashActivity.class);
+
+                    if ((null != sessionId) && (null != roomId)) {
+                        intent.putExtra(SplashActivity.EXTRA_MATRIX_ID, sessionId);
+                        intent.putExtra(SplashActivity.EXTRA_ROOM_ID, roomId);
+                    }
+
+                    activity.startActivity(intent);
+                    activity.finish();
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static final String RESTART_IN_PROGRESS_KEY = "RESTART_IN_PROGRESS_KEY";
 
     /**
      * The application has been started
@@ -230,12 +294,13 @@ public class CommonActivityUtils {
      * @param goToLoginPage true to jump to the login page
      */
     public static void logout(Activity activity, boolean goToLoginPage) {
-        EventStreamService.getInstance().removeNotification();
+        EventStreamService.removeNotification();
         stopEventStream(activity);
 
         try {
             ShortcutBadger.setBadge(activity, 0);
         } catch (Exception e) {
+            Log.d(LOG_TAG,"## logout(): Exception Msg="+e.getMessage());
         }
 
         // warn that the user logs out
@@ -248,27 +313,23 @@ public class CommonActivityUtils {
 
         // clear the preferences
         SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(activity);
-        String loginVal = preferences.getString(LoginActivity.LOGIN_PREF, "");
-        String passwordVal = preferences.getString(LoginActivity.PASSWORD_PREF, "");
 
         String homeServer = preferences.getString(LoginActivity.HOME_SERVER_URL_PREF, activity.getResources().getString(R.string.default_hs_server_url));
         String identityServer = preferences.getString(LoginActivity.IDENTITY_SERVER_URL_PREF, activity.getResources().getString(R.string.default_identity_server_url));
-        Boolean useGa = VectorApp.getInstance().useGA(activity);
+        Boolean useGa = GAHelper.useGA(activity);
 
         SharedPreferences.Editor editor = preferences.edit();
         editor.clear();
-        editor.putString(LoginActivity.PASSWORD_PREF, passwordVal);
-        editor.putString(LoginActivity.LOGIN_PREF, loginVal);
         editor.putString(LoginActivity.HOME_SERVER_URL_PREF, homeServer);
         editor.putString(LoginActivity.IDENTITY_SERVER_URL_PREF, identityServer);
         editor.commit();
 
         if (null != useGa) {
-            VectorApp.getInstance().setUseGA(activity, useGa);
+            GAHelper.setUseGA(activity, useGa);
         }
 
         // reset the GCM
-        Matrix.getInstance(activity).getSharedGcmRegistrationManager().reset();
+        Matrix.getInstance(activity).getSharedGCMRegistrationManager().reset();
 
         // clear credentials
         Matrix.getInstance(activity).clearSessions(activity, true);
@@ -317,6 +378,26 @@ public class CommonActivityUtils {
     //==============================================================================================================
 
     /**
+     * Indicate if a user is logged out or not. If no default session is enabled,
+     * no user is logged.
+     * @param aContext App context
+     * @return true if no user is logged in, false otherwise
+     */
+    private static boolean isUserLogout(Context aContext){
+        boolean retCode = false;
+
+        if(null == aContext) {
+            retCode = true;
+        } else {
+            if (null == Matrix.getInstance(aContext.getApplicationContext()).getDefaultSession()) {
+                retCode = true;
+            }
+        }
+
+        return retCode;
+    }
+
+    /**
      * Send an action to the events service.
      * @param context the context.
      * @param action the action to send.
@@ -326,17 +407,23 @@ public class CommonActivityUtils {
 
         Log.d(LOG_TAG, "sendEventStreamAction " + action);
 
-        // kill active connections
-        Intent killStreamService = new Intent(appContext, EventStreamService.class);
-        killStreamService.putExtra(EventStreamService.EXTRA_STREAM_ACTION, action.ordinal());
-        appContext.startService(killStreamService);
+        if(!isUserLogout(appContext)) {
+            // Fix https://github.com/vector-im/vector-android/issues/230
+            // Only start the service if a session is in progress, otherwise
+            // starting the service is useless
+            Intent killStreamService = new Intent(appContext, EventStreamService.class);
+            killStreamService.putExtra(EventStreamService.EXTRA_STREAM_ACTION, action.ordinal());
+            appContext.startService(killStreamService);
+        } else {
+            Log.d(LOG_TAG,"## sendEventStreamAction(): \""+action+"\" action not sent - user logged out");
+        }
     }
 
     /**
      * Stop the event stream.
      * @param context the context.
      */
-    public static void stopEventStream(Context context) {
+    private static void stopEventStream(Context context) {
         Log.d(LOG_TAG, "stopEventStream");
         sendEventStreamAction(context, EventStreamService.StreamAction.STOP);
     }
@@ -388,7 +475,7 @@ public class CommonActivityUtils {
         // either the application has never be launched
         // or the service has been killed on low memory
         if (EventStreamService.getInstance() == null) {
-            ArrayList<String> matrixIds = new ArrayList<String>();
+            ArrayList<String> matrixIds = new ArrayList<>();
             Collection<MXSession> sessions = Matrix.getInstance(context.getApplicationContext()).getSessions();
 
             if ((null != sessions) && (sessions.size() > 0)) {
@@ -413,6 +500,284 @@ public class CommonActivityUtils {
         }
     }
 
+    /**
+     * Check if the permissions provided in the list are granted.
+     * This is an asynchronous method if permissions are requested, the final response
+     * is provided in onRequestPermissionsResult(). In this case checkPermissions()
+     * returns false.
+     * <br>If checkPermissions() returns true, the permissions were already granted.
+     * The permissions to be granted are given as bit map in aPermissionsToBeGrantedBitMap (ex: {@link #REQUEST_CODE_PERMISSION_TAKE_PHOTO}).
+     * <br>aPermissionsToBeGrantedBitMap is passed as the request code in onRequestPermissionsResult().
+     *
+     * If a permission was already denied by the user, a popup is displayed to
+     * explain why vector needs the corresponding permission.
+     * @param aPermissionsToBeGrantedBitMap the permissions bit map to be granted
+     * @param aCallingActivity the calling Activity that is requesting the permissions
+     * @return true if the permissions are granted (synchronous flow), false otherwise (asynchronous flow)
+     */
+    public static boolean checkPermissions(final int aPermissionsToBeGrantedBitMap, final Activity aCallingActivity) {
+        boolean isPermissionGranted = false;
+
+        // sanity check
+        if(null == aCallingActivity){
+            Log.w(LOG_TAG, "## checkPermissions(): invalid input data");
+            isPermissionGranted = false;
+        } else if((REQUEST_CODE_PERMISSION_TAKE_PHOTO!=aPermissionsToBeGrantedBitMap)
+                && (REQUEST_CODE_PERMISSION_AUDIO_IP_CALL!=aPermissionsToBeGrantedBitMap)
+                && (REQUEST_CODE_PERMISSION_VIDEO_IP_CALL!=aPermissionsToBeGrantedBitMap)
+                && (REQUEST_CODE_PERMISSION_MEMBERS_SEARCH !=aPermissionsToBeGrantedBitMap)
+                && (REQUEST_CODE_PERMISSION_HOME_ACTIVITY !=aPermissionsToBeGrantedBitMap)
+                && (REQUEST_CODE_PERMISSION_MEMBER_DETAILS !=aPermissionsToBeGrantedBitMap)
+                ) {
+            Log.w(LOG_TAG, "## checkPermissions(): permissions to be granted are not supported");
+            isPermissionGranted = false;
+        } else {
+            List<String> permissionListAlreadyDenied = new ArrayList<>();
+            List<String> permissionsListToBeGranted = new ArrayList<>();
+            final List<String> finalPermissionsListToBeGranted;
+            boolean isRequestPermissionRequired = false;
+            Resources resource = aCallingActivity.getResources();
+            String explanationMessage;
+            String permissionType;
+
+            // retrieve the permissions to be granted according to the request code bit map
+            if(PERMISSION_CAMERA == (aPermissionsToBeGrantedBitMap & PERMISSION_CAMERA)){
+                permissionType = Manifest.permission.CAMERA;
+                isRequestPermissionRequired |= updatePermissionsToBeGranted(aCallingActivity, permissionListAlreadyDenied, permissionsListToBeGranted, permissionType);
+            }
+
+            if(PERMISSION_RECORD_AUDIO == (aPermissionsToBeGrantedBitMap & PERMISSION_RECORD_AUDIO)){
+                permissionType = Manifest.permission.RECORD_AUDIO;
+                isRequestPermissionRequired |= updatePermissionsToBeGranted(aCallingActivity, permissionListAlreadyDenied, permissionsListToBeGranted, permissionType);
+            }
+
+            if(PERMISSION_WRITE_EXTERNAL_STORAGE == (aPermissionsToBeGrantedBitMap & PERMISSION_WRITE_EXTERNAL_STORAGE)){
+                permissionType = Manifest.permission.WRITE_EXTERNAL_STORAGE;
+                isRequestPermissionRequired |= updatePermissionsToBeGranted(aCallingActivity, permissionListAlreadyDenied, permissionsListToBeGranted, permissionType);
+            }
+
+            // the contact book access is requested for any android platforms
+            // for android M, we use the system preferences
+            // for android < M, we use a dedicated settings
+            if(PERMISSION_READ_CONTACTS == (aPermissionsToBeGrantedBitMap & PERMISSION_READ_CONTACTS)) {
+                permissionType = Manifest.permission.READ_CONTACTS;
+
+                if (Build.VERSION.SDK_INT >= 23) {
+                    isRequestPermissionRequired |= updatePermissionsToBeGranted(aCallingActivity, permissionListAlreadyDenied, permissionsListToBeGranted, permissionType);
+                } else {
+                    if (!ContactsManager.isContactBookAccessRequested(aCallingActivity)) {
+                        isRequestPermissionRequired = true;
+                        permissionsListToBeGranted.add(permissionType);
+                    }
+                }
+            }
+
+            finalPermissionsListToBeGranted = permissionsListToBeGranted;
+
+            // if some permissions were already denied: display a dialog to the user before asking again..
+            if(!permissionListAlreadyDenied.isEmpty()) {
+                if(null != resource) {
+                    explanationMessage = resource.getString(R.string.permissions_rationale_msg_title);
+
+                    // add the user info text to be displayed to explain why the permission is required by the App
+                    for(String permissionAlreadyDenied : permissionListAlreadyDenied) {
+                        if (Manifest.permission.CAMERA.equals(permissionAlreadyDenied)) {
+                            explanationMessage += "\n\n" + resource.getString(R.string.permissions_rationale_msg_camera);
+                        } else if(Manifest.permission.RECORD_AUDIO.equals(permissionAlreadyDenied)){
+                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_record_audio);
+                        } else if(Manifest.permission.WRITE_EXTERNAL_STORAGE.equals(permissionAlreadyDenied)){
+                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_storage);
+                        } else if(Manifest.permission.READ_CONTACTS.equals(permissionAlreadyDenied)){
+                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_contacts);
+                        } else {
+                            Log.d(LOG_TAG, "## checkPermissions(): already denied permission not supported");
+                        }
+
+                    }
+                } else { // fall back if resource is null.. very unlikely
+                    explanationMessage = "You are about to be asked to grant permissions..\n\n";
+                }
+
+                // display the dialog with the info text
+                AlertDialog.Builder permissionsInfoDialog = new AlertDialog.Builder(aCallingActivity);
+                if(null != resource) {
+                    permissionsInfoDialog.setTitle(resource.getString(R.string.permissions_rationale_popup_title));
+                }
+
+                permissionsInfoDialog.setMessage(explanationMessage);
+                permissionsInfoDialog.setIcon(android.R.drawable.ic_dialog_info);
+                permissionsInfoDialog.setPositiveButton(aCallingActivity.getString(R.string.yes), new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (!finalPermissionsListToBeGranted.isEmpty()) {
+                            ActivityCompat.requestPermissions(aCallingActivity, finalPermissionsListToBeGranted.toArray(new String[finalPermissionsListToBeGranted.size()]), aPermissionsToBeGrantedBitMap);
+                        }
+                    }
+                });
+
+                Dialog dialog = permissionsInfoDialog.show();
+
+                dialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
+                    @Override
+                    public void onCancel(DialogInterface dialog) {
+                        CommonActivityUtils.displayToast(aCallingActivity, aCallingActivity.getString(R.string.missing_permissions_warning));
+                    }
+                });
+
+            } else {
+                // some permissions are not granted, ask permissions
+                if (isRequestPermissionRequired) {
+                    final String[] fPermissionsArrayToBeGranted = finalPermissionsListToBeGranted.toArray(new String[finalPermissionsListToBeGranted.size()]);
+
+                    // for android < M, we use a custom dialog to request the contacts book access.
+                    if (permissionsListToBeGranted.contains(Manifest.permission.READ_CONTACTS) && (Build.VERSION.SDK_INT < 23)) {
+                        AlertDialog.Builder permissionsInfoDialog = new AlertDialog.Builder(aCallingActivity);
+                        permissionsInfoDialog.setIcon(android.R.drawable.ic_dialog_info);
+
+                        if (null != resource) {
+                            permissionsInfoDialog.setTitle(resource.getString(R.string.permissions_rationale_popup_title));
+                        }
+
+                        permissionsInfoDialog.setMessage(R.string.permissions_msg_contacts_warning_other_androids);
+
+                        // gives the contacts book access
+                        permissionsInfoDialog.setPositiveButton(aCallingActivity.getString(R.string.yes), new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                ContactsManager.setIsContactBookAccessAllowed(aCallingActivity, true);
+                                ActivityCompat.requestPermissions(aCallingActivity, fPermissionsArrayToBeGranted, aPermissionsToBeGrantedBitMap);
+                            }
+                        });
+
+                        // or reject it
+                        permissionsInfoDialog.setNegativeButton(aCallingActivity.getString(R.string.no), new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                ContactsManager.setIsContactBookAccessAllowed(aCallingActivity, false);
+                                ActivityCompat.requestPermissions(aCallingActivity, fPermissionsArrayToBeGranted, aPermissionsToBeGrantedBitMap);
+                            }
+                        });
+
+                        permissionsInfoDialog.show();
+
+                    } else {
+                        ActivityCompat.requestPermissions(aCallingActivity, fPermissionsArrayToBeGranted, aPermissionsToBeGrantedBitMap);
+                    }
+                } else {
+                    // permissions were granted, start now..
+                    isPermissionGranted = true;
+                }
+            }
+        }
+        return isPermissionGranted;
+    }
+
+    /**
+     * Helper method used in {@link #checkPermissions(int, Activity)} to populate the list of the
+     * permissions to be granted (aPermissionsListToBeGranted_out) and the list of the permissions already denied (aPermissionAlreadyDeniedList_out).
+     * @param aCallingActivity calling activity
+     * @param aPermissionAlreadyDeniedList_out list to be updated with the permissions already denied by the user
+     * @param aPermissionsListToBeGranted_out list to be updated with the permissions to be granted
+     * @param permissionType the permission to be checked
+     * @return true if the permission requires to be granted, false otherwise
+     */
+    private static boolean updatePermissionsToBeGranted(final Activity aCallingActivity, List<String> aPermissionAlreadyDeniedList_out, List<String> aPermissionsListToBeGranted_out, final String permissionType) {
+        boolean isRequestPermissionRequested = false;
+
+        // add permission to be granted
+        aPermissionsListToBeGranted_out.add(permissionType);
+
+        if(PackageManager.PERMISSION_GRANTED != ContextCompat.checkSelfPermission(aCallingActivity.getApplicationContext(), permissionType)){
+            isRequestPermissionRequested = true;
+
+            // add permission to the ones that were already asked to the user
+            if(ActivityCompat.shouldShowRequestPermissionRationale(aCallingActivity, permissionType)){
+                aPermissionAlreadyDeniedList_out.add(permissionType);
+            }
+        }
+        return isRequestPermissionRequested;
+    }
+
+    /**
+     * Helper method to process {@link CommonActivityUtils#REQUEST_CODE_PERMISSION_AUDIO_IP_CALL}
+     * on onRequestPermissionsResult() methods.
+     * @param aContext App context
+     * @param aPermissions permissions list
+     * @param aGrantResults permissions granted results
+     * @return true if audio IP call is permitted, false otherwise
+     */
+    public static boolean onPermissionResultAudioIpCall(Context aContext, String[] aPermissions, int[] aGrantResults) {
+        boolean isPermissionGranted = false;
+
+        try {
+            if (Manifest.permission.RECORD_AUDIO.equals(aPermissions[0])) {
+                if (PackageManager.PERMISSION_GRANTED == aGrantResults[0]) {
+                    Log.d(LOG_TAG, "## onPermissionResultAudioIpCall(): RECORD_AUDIO permission granted");
+                    isPermissionGranted = true;
+                } else {
+                    Log.d(LOG_TAG, "## onPermissionResultAudioIpCall(): RECORD_AUDIO permission not granted");
+                    if(null != aContext)
+                        CommonActivityUtils.displayToast(aContext, aContext.getString(R.string.permissions_action_not_performed_missing_permissions));
+                }
+            }
+        } catch (Exception ex){
+            Log.d(LOG_TAG, "## onPermissionResultAudioIpCall(): Exception MSg="+ex.getMessage());
+        }
+
+        return isPermissionGranted;
+    }
+
+    /**
+     * Helper method to process {@link CommonActivityUtils#REQUEST_CODE_PERMISSION_VIDEO_IP_CALL}
+     * on onRequestPermissionsResult() methods.
+     * For video IP calls, record audio and camera permissions are both mandatory.
+     * @param aContext App context
+     * @param aPermissions permissions list
+     * @param aGrantResults permissions granted results
+     * @return true if video IP call is permitted, false otherwise
+     */
+    public static boolean onPermissionResultVideoIpCall(Context aContext, String[] aPermissions, int[] aGrantResults) {
+        boolean isPermissionGranted = false;
+        int result = 0;
+
+        try {
+            for (int i = 0; i < aPermissions.length; i++) {
+                Log.d(LOG_TAG, "## onPermissionResultVideoIpCall(): " + aPermissions[i] + "=" + aGrantResults[i]);
+
+                if (Manifest.permission.CAMERA.equals(aPermissions[i])) {
+                    if (PackageManager.PERMISSION_GRANTED == aGrantResults[i]) {
+                        Log.d(LOG_TAG, "## onPermissionResultVideoIpCall(): CAMERA permission granted");
+                        result++;
+                    } else {
+                        Log.w(LOG_TAG, "## onPermissionResultVideoIpCall(): CAMERA permission not granted");
+                    }
+                }
+
+                if (Manifest.permission.RECORD_AUDIO.equals(aPermissions[i])) {
+                    if (PackageManager.PERMISSION_GRANTED == aGrantResults[i]) {
+                        Log.d(LOG_TAG, "## onPermissionResultVideoIpCall(): WRITE_EXTERNAL_STORAGE permission granted");
+                        result++;
+                    } else {
+                        Log.w(LOG_TAG, "## onPermissionResultVideoIpCall(): RECORD_AUDIO permission not granted");
+                    }
+                }
+            }
+
+            // Video over IP requires, both Audio & Video !
+            if (2 == result) {
+                isPermissionGranted = true;
+            } else {
+                Log.w(LOG_TAG, "## onPermissionResultVideoIpCall(): No permissions granted to IP call (video or audio)");
+                if(null != aContext)
+                    CommonActivityUtils.displayToast(aContext, aContext.getString(R.string.permissions_action_not_performed_missing_permissions));
+            }
+        } catch (Exception ex){
+            Log.d(LOG_TAG, "## onPermissionResultVideoIpCall(): Exception MSg="+ex.getMessage());
+        }
+
+        return isPermissionGranted;
+    }
+
     //==============================================================================================================
     // Room preview methods.
     //==============================================================================================================
@@ -431,6 +796,53 @@ public class CommonActivityUtils {
             intent.putExtra(VectorRoomActivity.EXTRA_EXPAND_ROOM_HEADER, true);
             fromActivity.startActivity(intent);
         }
+    }
+
+    /**
+     * Helper method used to build an intent to trigger a room preview.
+     * @param aMatrixId matrix ID of the user
+     * @param aRoomId room ID
+     * @param aContext application context
+     * @param aTargetActivity the activity set in the returned intent
+     * @return a valid intent if operation succeed, null otherwise
+     */
+    public static Intent buildIntentPreviewRoom(String aMatrixId, String aRoomId, Context aContext, Class<?> aTargetActivity) {
+        Intent intentRetCode;
+
+        // sanity check
+        if ((null == aContext) || (null == aRoomId) || (null == aMatrixId)){
+            intentRetCode = null;
+        } else {
+            MXSession session;
+
+            // get the session
+            if(null == (session = Matrix.getInstance(aContext).getSession(aMatrixId))) {
+                session = Matrix.getInstance(aContext).getDefaultSession();
+            }
+
+            // check session validity
+            if ((null == session) || !session.isAlive()) {
+                intentRetCode = null;
+            } else {
+                String roomAlias = null;
+                Room room = session.getDataHandler().getRoom(aRoomId);
+
+                // get the room alias (if any) for the preview data
+                if ((null != room) && (null != room.getLiveState())) {
+                    roomAlias = room.getLiveState().getAlias();
+                }
+
+                intentRetCode = new Intent(aContext, aTargetActivity);
+                // extra required by VectorRoomActivity
+                intentRetCode.putExtra(VectorRoomActivity.EXTRA_ROOM_ID, aRoomId);
+                intentRetCode.putExtra(VectorRoomActivity.EXTRA_ROOM_PREVIEW_ID, aRoomId);
+                intentRetCode.putExtra(VectorRoomActivity.EXTRA_MATRIX_ID, aMatrixId);
+                intentRetCode.putExtra(VectorRoomActivity.EXTRA_EXPAND_ROOM_HEADER, true);
+                // extra only required by VectorFakeRoomPreviewActivity
+                intentRetCode.putExtra(VectorRoomActivity.EXTRA_ROOM_PREVIEW_ROOM_ALIAS, roomAlias);
+            }
+        }
+        return intentRetCode;
     }
 
     /**
@@ -466,7 +878,7 @@ public class CommonActivityUtils {
                 previewRoom(fromActivity, roomPreviewData);
             } else {
                 Log.d(LOG_TAG, "previewRoom : open the room");
-                HashMap<String, Object> params = new HashMap<String, Object>();
+                HashMap<String, Object> params = new HashMap<>();
                 params.put(VectorRoomActivity.EXTRA_MATRIX_ID, session.getMyUserId());
                 params.put(VectorRoomActivity.EXTRA_ROOM_ID, roomId);
                 CommonActivityUtils.goToRoomPage(fromActivity, session, params);
@@ -584,10 +996,10 @@ public class CommonActivityUtils {
                                                    Room room = finalSession.getDataHandler().getRoom((String) params.get(VectorRoomActivity.EXTRA_ROOM_ID));
 
                                                    if ((null != room) && room.isInvited()) {
-                                                       String displayname = VectorUtils.getRoomDisplayname(fromActivity, finalSession, room);
+                                                       String displayName = VectorUtils.getRoomDisplayName(fromActivity, finalSession, room);
 
-                                                       if (null != displayname) {
-                                                           intent.putExtra(VectorRoomActivity.EXTRA_DEFAULT_NAME, displayname);
+                                                       if (null != displayName) {
+                                                           intent.putExtra(VectorRoomActivity.EXTRA_DEFAULT_NAME, displayName);
                                                        }
                                                    }
                                                }
@@ -604,27 +1016,101 @@ public class CommonActivityUtils {
     //==============================================================================================================
 
     /**
-     * Search the first existing room with a dedicated user.
-     * @param aSession the session
-     * @param otherUserId the other user id
-     * @return the room if it exits.
+     * Return all the 1:1 rooms joined by the searched user and by the current logged in user.
+     * This method go through all the rooms, and for each room, tests if the searched user
+     * and the logged in user are present.
+     * @param aSession session
+     * @param aSearchedUserId the searched user ID
+     * @return an array containing the found rooms
      */
-    public static Room findOneToOneRoom(final MXSession aSession, final String otherUserId) {
-        Collection<Room> rooms = aSession.getDataHandler().getStore().getRooms();
+    private static ArrayList<Room> findOneToOneRoomList(final MXSession aSession, final String aSearchedUserId) {
+        ArrayList<Room> listRetValue = new ArrayList<>();
+        List<RoomMember> roomMembersList;
+        String userId0, userId1;
 
-        for (Room room : rooms) {
-            Collection<RoomMember> members = room.getMembers();
+        if((null!=aSession) && (null!=aSearchedUserId)) {
+            Collection<Room> roomsList = aSession.getDataHandler().getStore().getRooms();
 
-            if (members.size() == 2) {
-                for (RoomMember member : members) {
-                    if (member.getUserId().equals(otherUserId)) {
-                        return room;
+            for (Room room : roomsList) {
+                roomMembersList = (List<RoomMember>)room.getJoinedMembers();
+
+                if ((null != roomMembersList) && (ROOM_SIZE_ONE_TO_ONE == roomMembersList.size())) {
+                    userId0 = roomMembersList.get(0).getUserId();
+                    userId1 = roomMembersList.get(1).getUserId();
+
+                    // add the room where the second member is the searched one
+                    if (userId0.equals(aSearchedUserId) || userId1.equals(aSearchedUserId)) {
+                        listRetValue.add(room);
                     }
                 }
             }
         }
 
-        return null;
+        return listRetValue;
+    }
+
+    /**
+     * Return the 1:1 room with the most recent message, that the searched user and the current
+     * logged user have joined.
+     * Among the list of the 1:1 rooms, joined by the user, the room with the most recent
+     * posted message is chosen to be returned.
+     * @param aSession session
+     * @param aSearchedUserId the searched user ID
+     * @return 1:1 room joined by the user with the most recent message, null otherwise
+     */
+    private static Room findLatestOneToOneRoom(final MXSession aSession, final String aSearchedUserId) {
+        long serverTimeStamp = 0, newServerTimeStamp;
+        RoomSummary summary;
+        Room mostRecentRoomRetValue = null;
+        IMXStore mStore = aSession.getDataHandler().getStore();
+
+        // get all the "one to one" rooms where the user has joined
+        ArrayList<Room> roomsFoundList = findOneToOneRoomList(aSession, aSearchedUserId);
+
+        // parse all the 1:1 rooms and take the one with the most recent message.
+        if (!roomsFoundList.isEmpty()) {
+            for (Room room : roomsFoundList) {
+
+                summary = mStore.getSummary(room.getRoomId());
+                try {
+                    // test on the most recent time stamp
+                    if ((null != summary) && ((newServerTimeStamp = summary.getLatestReceivedEvent().getOriginServerTs()) > serverTimeStamp)) {
+                        mostRecentRoomRetValue = room;
+                        serverTimeStamp = newServerTimeStamp;
+                    }
+                } catch(Exception ex) {
+                    Log.e(LOG_TAG,"## findLatestOneToOneRoom(): Exception Msg="+ex.getMessage());
+                }
+            }
+        }
+
+        return mostRecentRoomRetValue;
+    }
+
+    /**
+     * Check if the room is a 1:1 room and if the searched user has joined this room.
+     * The user ID is searched in the room only if the room is a 1:1 room.
+     * This method is useful to check if we can create a new 1:1 room when it is
+     * asked from a already existing room (see {@link VectorMemberDetailsActivity#ITEM_ACTION_START_CHAT}).
+     * @param aRoom room to be checked
+     * @param aSearchedUserId the user ID to be searched in the room
+     * @return true if the room is a 1:1 room where the user ID is present, false otherwise
+     */
+    public static boolean isOneToOneRoomJoinedByUserId(final Room aRoom, final String aSearchedUserId) {
+        boolean retVal = false;
+        List<RoomMember> memberList;
+
+        if((null != aRoom) && (null != (memberList=(List<RoomMember>)aRoom.getJoinedMembers()))){
+            if(CommonActivityUtils.ROOM_SIZE_ONE_TO_ONE == memberList.size()) {
+                for (RoomMember member : memberList) {
+                    if (member.getUserId().equals(aSearchedUserId)) {
+                        retVal = true;
+                    }
+                }
+            }
+        }
+
+        return retVal;
     }
 
     /**
@@ -656,12 +1142,12 @@ public class CommonActivityUtils {
         }
 
         final MXSession fSession = session;
-        Room room = findOneToOneRoom(session, otherUserId);
+        Room room = findLatestOneToOneRoom(session, otherUserId);
 
         // the room already exists -> switch to it
         if (null != room) {
             Log.d(LOG_TAG,"## goToOneToOneRoom(): room already exists");
-            HashMap<String, Object> params = new HashMap<String, Object>();
+            HashMap<String, Object> params = new HashMap<>();
 
             params.put(VectorRoomActivity.EXTRA_MATRIX_ID, session.getMyUserId());
             params.put(VectorRoomActivity.EXTRA_ROOM_ID, room.getRoomId());
@@ -674,8 +1160,7 @@ public class CommonActivityUtils {
             }
         } else {
             Log.d(LOG_TAG,"## goToOneToOneRoom(): start createRoom()");
-            session.createRoom(null, null, RoomState.VISIBILITY_PRIVATE, null, new SimpleApiCallback<String>(fromActivity) {
-
+            session.createRoom(new SimpleApiCallback<String>(fromActivity) {
                 @Override
                 public void onSuccess(String roomId) {
                     final Room room = fSession.getDataHandler().getRoom(roomId);
@@ -683,7 +1168,7 @@ public class CommonActivityUtils {
                     final SimpleApiCallback inviteCallback = new SimpleApiCallback<Void>(this) {
                         @Override
                         public void onSuccess(Void info) {
-                            HashMap<String, Object> params = new HashMap<String, Object>();
+                            HashMap<String, Object> params = new HashMap<>();
                             params.put(VectorRoomActivity.EXTRA_MATRIX_ID, fSession.getMyUserId());
                             params.put(VectorRoomActivity.EXTRA_ROOM_ID, room.getRoomId());
                             params.put(VectorRoomActivity.EXTRA_EXPAND_ROOM_HEADER, true);
@@ -799,20 +1284,20 @@ public class CommonActivityUtils {
      * @param intent       the intent param
      * @param session      the session/
      */
-    public static void sendFilesTo(final Activity fromActivity, final Intent intent, final MXSession session) {
+    private static void sendFilesTo(final Activity fromActivity, final Intent intent, final MXSession session) {
         // sanity check
         if ((null == session) || !session.isAlive()) {
             return;
         }
 
-        ArrayList<RoomSummary> mergedSummaries = new ArrayList<RoomSummary>(session.getDataHandler().getStore().getSummaries());
+        ArrayList<RoomSummary> mergedSummaries = new ArrayList<>(session.getDataHandler().getStore().getSummaries());
 
         // keep only the joined room
         for (int index = 0; index < mergedSummaries.size(); index++) {
             RoomSummary summary = mergedSummaries.get(index);
             Room room = session.getDataHandler().getRoom(summary.getRoomId());
-
-            if ((null == room) || room.isInvited()) {
+            
+            if ((null == room) || room.isInvited() || room.isConferenceUserRoom()) {
                 mergedSummaries.remove(index);
                 index--;
             }
@@ -821,15 +1306,15 @@ public class CommonActivityUtils {
         Collections.sort(mergedSummaries, new Comparator<RoomSummary>() {
             @Override
             public int compare(RoomSummary lhs, RoomSummary rhs) {
-                if (lhs == null || lhs.getLatestEvent() == null) {
+                if (lhs == null || lhs.getLatestReceivedEvent() == null) {
                     return 1;
-                } else if (rhs == null || rhs.getLatestEvent() == null) {
+                } else if (rhs == null || rhs.getLatestReceivedEvent() == null) {
                     return -1;
                 }
 
-                if (lhs.getLatestEvent().getOriginServerTs() > rhs.getLatestEvent().getOriginServerTs()) {
+                if (lhs.getLatestReceivedEvent().getOriginServerTs() > rhs.getLatestReceivedEvent().getOriginServerTs()) {
                     return -1;
-                } else if (lhs.getLatestEvent().getOriginServerTs() < rhs.getLatestEvent().getOriginServerTs()) {
+                } else if (lhs.getLatestReceivedEvent().getOriginServerTs() < rhs.getLatestReceivedEvent().getOriginServerTs()) {
                     return 1;
                 }
                 return 0;
@@ -863,7 +1348,7 @@ public class CommonActivityUtils {
                             public void run() {
                                 RoomSummary summary = fMergedSummaries.get(which);
 
-                                HashMap<String, Object> params = new HashMap<String, Object>();
+                                HashMap<String, Object> params = new HashMap<>();
                                 params.put(VectorRoomActivity.EXTRA_MATRIX_ID, session.getMyUserId());
                                 params.put(VectorRoomActivity.EXTRA_ROOM_ID, summary.getRoomId());
                                 params.put(VectorRoomActivity.EXTRA_ROOM_INTENT, intent);
@@ -880,30 +1365,7 @@ public class CommonActivityUtils {
     // Parameters checkers.
     //==============================================================================================================
 
-    /**
-     * Check if the userId format is valid with the matrix standard.
-     * It should start with a @ and ends with the home server suffix.
-     *
-     * @param userId           the userID to check
-     * @param homeServerSuffix the home server suffix
-     * @return the checked user ID
-     */
-    public static String checkUserId(String userId, String homeServerSuffix) {
-        String res = userId;
 
-        if (res.length() > 0) {
-            res = res.trim();
-            if (!res.startsWith("@")) {
-                res = "@" + res;
-            }
-
-            if (res.indexOf(":") < 0) {
-                res += homeServerSuffix;
-            }
-        }
-
-        return res;
-    }
 
     //==============================================================================================================
     // Media utils
@@ -930,6 +1392,7 @@ public class CommonActivityUtils {
                     } catch (ActivityNotFoundException e) {
                         Toast.makeText(activity, e.getLocalizedMessage(), Toast.LENGTH_LONG).show();
                     } catch (Exception e) {
+                        Log.d(LOG_TAG,"## openMedia(): Exception Msg="+e.getMessage());
                     }
                 }
             });
@@ -939,15 +1402,14 @@ public class CommonActivityUtils {
     /**
      * Copy a file into a dstPath directory.
      * The output filename can be provided.
-     * The output file is not overriden if it is already exist.
+     * The output file is not overridden if it is already exist.
      *
-     * @param context        the context
      * @param sourceFile     the file source path
      * @param dstDirPath     the dst path
      * @param outputFilename optional the output filename
      * @return the downloads file path if the file exists or has been properly saved
      */
-    public static String saveFileInto(Context context, File sourceFile, String dstDirPath, String outputFilename) {
+    private static String saveFileInto(File sourceFile, String dstDirPath, String outputFilename) {
         // sanity check
         if ((null == sourceFile) || (null == dstDirPath)) {
             return null;
@@ -1003,6 +1465,7 @@ public class CommonActivityUtils {
                 if (inputStream != null) inputStream.close();
                 if (outputStream != null) outputStream.close();
             } catch (Exception e) {
+                Log.e(LOG_TAG,"## saveFileInto(): Exception Msg="+e.getMessage());
             }
         }
 
@@ -1023,7 +1486,7 @@ public class CommonActivityUtils {
      */
     @SuppressLint("NewApi")
     public static String saveMediaIntoDownloads(Context context, File srcFile, String filename, String mimeType) {
-        String fullFilePath = saveFileInto(context, srcFile, Environment.DIRECTORY_DOWNLOADS, filename);
+        String fullFilePath = saveFileInto(srcFile, Environment.DIRECTORY_DOWNLOADS, filename);
 
         if (android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
             if (null != fullFilePath) {
@@ -1033,6 +1496,7 @@ public class CommonActivityUtils {
                     File file = new File(fullFilePath);
                     downloadManager.addCompletedDownload(file.getName(), file.getName(), true, mimeType, file.getAbsolutePath(), file.length(), true);
                 } catch (Exception e) {
+                    Log.e(LOG_TAG,"## saveMediaIntoDownloads(): Exception Msg="+e.getMessage());
                 }
             }
         }
@@ -1040,26 +1504,25 @@ public class CommonActivityUtils {
         return fullFilePath;
     }
 
-    /**
-     * Save an image URI into the gallery
-     *
-     * @param context    the context.
-     * @param sourceFile the image path to save.
-     */
-    public static String saveImageIntoGallery(Context context, File sourceFile) {
-        String filePath = saveFileInto(context, sourceFile, Environment.DIRECTORY_PICTURES, null);
-
-        if (null != filePath) {
-            // This broadcasts that there's been a change in the media directory
-            context.sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(new File(filePath))));
-        }
-
-        return filePath;
-    }
-
     //==============================================================================================================
     // toast utils
     //==============================================================================================================
+
+    /**
+     * Helper method to display a toast message.
+     * @param aCallingActivity calling Activity instance
+     * @param aMsgToDisplay message to display
+     */
+    public static void displayToastOnUiThread(final Activity aCallingActivity, final String aMsgToDisplay)  {
+        if(null != aCallingActivity) {
+            aCallingActivity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    CommonActivityUtils.displayToast(aCallingActivity.getApplicationContext(), aMsgToDisplay);
+                }
+            });
+        }
+    }
 
     /**
      * Display a toast
@@ -1077,6 +1540,39 @@ public class CommonActivityUtils {
      */
     public static void displaySnack(View aTargetView, CharSequence aTextToDisplay) {
         Snackbar.make(aTargetView, aTextToDisplay, Snackbar.LENGTH_SHORT).show();
+    }
+
+    //==============================================================================================================
+    // call utils
+    //==============================================================================================================
+
+    /**
+     * Display a toast message according to the end call reason.
+     *
+     * @param aCallingActivity calling activity
+     * @param aCallEndReason define the reason of the end call
+     */
+    public static void processEndCallInfo(Activity aCallingActivity, int aCallEndReason) {
+        if(null != aCallingActivity) {
+            if (IMXCall.END_CALL_REASON_UNDEFINED != aCallEndReason) {
+                switch (aCallEndReason) {
+                    case IMXCall.END_CALL_REASON_PEER_HANG_UP:
+                        if(aCallingActivity instanceof InComingCallActivity) {
+                            CommonActivityUtils.displayToastOnUiThread(aCallingActivity, aCallingActivity.getString(R.string.call_error_peer_cancelled_call));
+                        } else {
+                            // let VectorCallActivity manage its
+                        }
+                        break;
+
+                    case IMXCall.END_CALL_REASON_PEER_HANG_UP_ELSEWHERE:
+                        CommonActivityUtils.displayToastOnUiThread(aCallingActivity, aCallingActivity.getString(R.string.call_error_peer_hangup_elsewhere));
+                        break;
+
+                    default:
+                        break;
+                }
+            }
+        }
     }
 
     //==============================================================================================================
@@ -1129,16 +1625,16 @@ public class CommonActivityUtils {
             mBadgeValue = badgeValue;
             ShortcutBadger.setBadge(context, badgeValue);
         } catch (Exception e) {
+            Log.e(LOG_TAG,"## updateBadgeCount(): Exception Msg="+e.getMessage());
         }
     }
 
     /**
-     * @return the bagde value
+     * @return the badge value
      */
     public static int getBadgeCount() {
         return mBadgeValue;
     }
-
 
     //==============================================================================================================
     // Low memory management
@@ -1147,9 +1643,11 @@ public class CommonActivityUtils {
     private static final String LOW_MEMORY_LOG_TAG = "Memory usage";
 
     /**
-     * Log the memory status.
+     * Log the memory statuses.
+     * @param activity the calling activity
+     * @return if the device is running on low memory.
      */
-    public static void displayMemoryInformation(Activity activity) {
+    public static boolean displayMemoryInformation(Activity activity) {
         long freeSize = 0L;
         long totalSize = 0L;
         long usedSize = -1L;
@@ -1178,25 +1676,32 @@ public class CommonActivityUtils {
         Log.e(LOW_MEMORY_LOG_TAG, "threshold  " + (mi.threshold / 1048576L) + " MB");
         Log.e(LOW_MEMORY_LOG_TAG, "lowMemory  " + (mi.lowMemory));
         Log.e(LOW_MEMORY_LOG_TAG, "---------------------------------------------------");
+
+        return mi.lowMemory;
     }
 
     /**
      * Manage the low memory case
      *
-     * @param activity
+     * @param activity activity instance
      */
     public static void onLowMemory(Activity activity) {
         if (!VectorApp.isAppInBackground()) {
-            Log.e(LOW_MEMORY_LOG_TAG, "Active application : onLowMemory from " + activity);
+            String activityName = (null!=activity)?activity.getClass().getSimpleName():"NotAvailable";
+            Log.e(LOW_MEMORY_LOG_TAG, "Active application : onLowMemory from " + activityName);
 
-            displayMemoryInformation(activity);
-
-            if (CommonActivityUtils.shouldRestartApp(activity)) {
-                Log.e(LOW_MEMORY_LOG_TAG, "restart");
-                CommonActivityUtils.restartApp(activity);
+            // it seems that onLowMemory is called whereas the device is seen on low memory condition
+            // so, test if the both conditions
+            if (displayMemoryInformation(activity)) {
+                if (CommonActivityUtils.shouldRestartApp(activity)) {
+                    Log.e(LOW_MEMORY_LOG_TAG, "restart");
+                    CommonActivityUtils.restartApp(activity);
+                } else {
+                    Log.e(LOW_MEMORY_LOG_TAG, "clear the application cache");
+                    Matrix.getInstance(activity).reloadSessions(activity);
+                }
             } else {
-                Log.e(LOW_MEMORY_LOG_TAG, "clear the application cache");
-                Matrix.getInstance(activity).reloadSessions(activity);
+                Log.e(LOW_MEMORY_LOG_TAG, "Wait to be concerned");
             }
         } else {
             Log.e(LOW_MEMORY_LOG_TAG, "background application : onLowMemory ");
@@ -1211,7 +1716,8 @@ public class CommonActivityUtils {
      * @param level the memory level
      */
     public static void onTrimMemory(Activity activity, int level) {
-        Log.e("Low Memory","application : onTrimMemory "+level);
+        String activityName = (null!=activity)?activity.getClass().getSimpleName():"NotAvailable";
+        Log.e(LOW_MEMORY_LOG_TAG, "Active application : onTrimMemory from "+ activityName+" level=" + level);
         // TODO implement things to reduce memory usage
 
         displayMemoryInformation(activity);

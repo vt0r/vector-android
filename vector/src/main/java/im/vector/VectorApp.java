@@ -17,28 +17,23 @@
 package im.vector;
 import android.app.Activity;
 import android.app.Application;
-import android.content.Context;
-import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.os.Build;
-import android.preference.PreferenceManager;
-import android.text.TextUtils;
+import android.os.Bundle;
 import android.util.Log;
-
-import com.google.android.gms.analytics.ExceptionParser;
 
 import org.matrix.androidsdk.MXSession;
 
-import im.vector.activity.CallViewActivity;
+import im.vector.activity.VectorCallViewActivity;
 import im.vector.activity.CommonActivityUtils;
 import im.vector.contacts.ContactsManager;
 import im.vector.contacts.PIDsRetriever;
-import im.vector.ga.Analytics;
+import im.vector.ga.GAHelper;
 import im.vector.gcm.GcmRegistrationManager;
 import im.vector.services.EventStreamService;
 import im.vector.util.LogUtilities;
+import im.vector.util.RageShake;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -51,40 +46,74 @@ import java.util.TimerTask;
 public class VectorApp extends Application {
     private static final String LOG_TAG = "VectorApp";
 
+    /**
+     * The current instance.
+     */
+    private static VectorApp instance = null;
+
+    /**
+     * Rage shake detection to send a bug report.
+     */
+    private static final RageShake mRageShake = new RageShake();
+
+    /**
+     * Delay to detect if the application is in background.
+     * If there is no active activity during the elapsed time, it means that the application is in background.
+     */
+    private static final long MAX_ACTIVITY_TRANSITION_TIME_MS = 2000;
+
+    /**
+     * The current active activity
+     */
+    private static Activity mCurrentActivity = null;
+
+    /**
+     * Background application detection
+     */
     private Timer mActivityTransitionTimer;
     private TimerTask mActivityTransitionTimerTask;
     private boolean mIsInBackground = true;
-    private final long MAX_ACTIVITY_TRANSITION_TIME_MS = 2000;
 
-    // google analytics
-    private int VERSION_BUILD = -1;
-    private String VECTOR_VERSION_STRING = "";
-    private String SDK_VERSION_STRING = "";
+    /**
+     * Google analytics information.
+     */
+    public static int VERSION_BUILD = -1;
+    public static String VECTOR_VERSION_STRING = "";
+    public static String SDK_VERSION_STRING = "";
 
-    private Boolean mIsCallingInBackground = false;
+    /**
+     * Tells if there a pending call whereas the application is backgrounded.
+     */
+    private boolean mIsCallingInBackground = false;
 
-    private static VectorApp instance = null;
+    /**
+     * Monitor the created activities to detect memory leaks.
+     */
+    private final ArrayList<String> mCreatedActivities = new ArrayList<>();
 
-    private EventEmitter<Activity> mOnActivityDestroyedListener;
-
-    private static Bitmap mSavedPickerImagePreview = null;
+    /**
+     * @return the current instance
+     */
+    public static VectorApp getInstance() {
+        return instance;
+    }
 
     @Override
     public void onCreate() {
+        Log.d(LOG_TAG, "onCreate");
         super.onCreate();
 
         instance = this;
-
-        mOnActivityDestroyedListener = new EventEmitter<>();
-
         mActivityTransitionTimer = null;
         mActivityTransitionTimerTask = null;
 
         try {
-            PackageInfo pinfo = getPackageManager().getPackageInfo(getPackageName(), 0);
-            VERSION_BUILD = pinfo.versionCode;
+            PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            VERSION_BUILD = packageInfo.versionCode;
         }
-        catch (PackageManager.NameNotFoundException e) {}
+        catch (PackageManager.NameNotFoundException e) {
+            Log.e(LOG_TAG, "fails to retrieve the package info " + e.getMessage());
+        }
 
         VECTOR_VERSION_STRING = Matrix.getInstance(this).getVersion(true);
 
@@ -98,82 +127,126 @@ public class VectorApp extends Application {
         LogUtilities.setLogDirectory(new File(getCacheDir().getAbsolutePath() + "/logs"));
         LogUtilities.storeLogcat();
 
-        initGoogleAnalytics(getApplicationContext());
+        GAHelper.initGoogleAnalytics(getApplicationContext());
 
-        // get the contact update at application launch
-        ContactsManager.refreshLocalContactsSnapshot(this);
+        mRageShake.start(this);
+
+        this.registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
+            @Override
+            public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
+                mCreatedActivities.add(activity.toString());
+            }
+
+            @Override
+            public void onActivityStarted(Activity activity) {
+            }
+
+            @Override
+            public void onActivityResumed(Activity activity) {
+                setCurrentActivity(activity);
+            }
+
+            @Override
+            public void onActivityPaused(Activity activity) {
+                setCurrentActivity(null);
+            }
+
+            @Override
+            public void onActivityStopped(Activity activity) {
+            }
+
+            @Override
+            public void onActivitySaveInstanceState(Activity activity, Bundle outState) {
+            }
+
+            @Override
+            public void onActivityDestroyed(Activity activity) {
+                mCreatedActivities.remove(activity.toString());
+
+                if (mCreatedActivities.size() > 1) {
+                    Log.d(LOG_TAG, "onActivityDestroyed : \n" + mCreatedActivities);
+                }
+            }
+        });
     }
 
-    public static VectorApp getInstance() {
-        return instance;
-    }
-
-    public EventEmitter<Activity> getOnActivityDestroyedListener() {
-        return mOnActivityDestroyedListener;
-    }
     /**
      * Suspend background threads.
      */
     private void suspendApp() {
+        GcmRegistrationManager gcmRegistrationManager = Matrix.getInstance(VectorApp.this).getSharedGCMRegistrationManager();
+
         // suspend the events thread if the client uses GCM
-        if (Matrix.getInstance(VectorApp.this).getSharedGcmRegistrationManager().useGCM()) {
+        if (!gcmRegistrationManager.isBackgroundSyncAllowed() || (gcmRegistrationManager.useGCM() && gcmRegistrationManager.hasRegistrationToken())) {
+            Log.d(LOG_TAG, "suspendApp ; pause the event stream");
             CommonActivityUtils.pauseEventStream(VectorApp.this);
+        } else {
+            Log.d(LOG_TAG, "suspendApp ; the event stream is not paused because GCM is disabled.");
         }
+
+        // the sessions are not anymore seen as "online"
+        ArrayList<MXSession> sessions = Matrix.getInstance(this).getSessions();
+        for(MXSession session : sessions) {
+            if (session.isAlive()) {
+                session.setIsOnline(false);
+                session.setSyncDelay(gcmRegistrationManager.getBackgroundSyncDelay());
+                session.setSyncTimeout(gcmRegistrationManager.getBackgroundSyncTimeOut());
+            }
+        }
+
         PIDsRetriever.getIntance().onAppBackgrounded();
 
         MyPresenceManager.advertiseAllUnavailable();
     }
 
     /**
-     * The application is warned that a call is ended.
+     * Test if application is put in background.
+     * i.e wait 2s before assuming that the application is put in background.
      */
-    public void onCallEnd() {
-        if (isAppInBackground() && mIsCallingInBackground) {
-            Log.d(LOG_TAG, "onCallEnd : Suspend the events thread because the call was ended whereas the application was in background");
-            suspendApp();
-        }
-
-        mIsCallingInBackground = false;
-    }
-
     private void startActivityTransitionTimer() {
-        this.mActivityTransitionTimer = new Timer();
-        this.mActivityTransitionTimerTask = new TimerTask() {
+        mActivityTransitionTimer = new Timer();
+        mActivityTransitionTimerTask = new TimerTask() {
+            @Override
             public void run() {
-                if (VectorApp.this.mActivityTransitionTimerTask != null) {
-                    VectorApp.this.mActivityTransitionTimerTask.cancel();
-                    VectorApp.this.mActivityTransitionTimerTask = null;
+                if (mActivityTransitionTimerTask != null) {
+                    mActivityTransitionTimerTask.cancel();
+                    mActivityTransitionTimerTask = null;
                 }
 
-                if (VectorApp.this.mActivityTransitionTimer != null) {
-                    VectorApp.this.mActivityTransitionTimer.cancel();
-                    VectorApp.this.mActivityTransitionTimer = null;
+                if (mActivityTransitionTimer != null) {
+                    mActivityTransitionTimer.cancel();
+                    mActivityTransitionTimer = null;
                 }
 
                 VectorApp.this.mIsInBackground = true;
-                mIsCallingInBackground = (null != CallViewActivity.getActiveCall());
+                mIsCallingInBackground = (null != VectorCallViewActivity.getActiveCall());
 
                 // if there is a pending call
                 // the application is not suspended
                 if (!mIsCallingInBackground) {
                     Log.d(LOG_TAG, "Suspend the application because there was no resumed activity within 2 seconds");
                     suspendApp();
+                } else {
+                    Log.d(LOG_TAG, "App not suspended due to call in progress");
                 }
             }
         };
 
-        this.mActivityTransitionTimer.schedule(mActivityTransitionTimerTask, MAX_ACTIVITY_TRANSITION_TIME_MS);
+        mActivityTransitionTimer.schedule(mActivityTransitionTimerTask, MAX_ACTIVITY_TRANSITION_TIME_MS);
     }
 
+    /**
+     * Stop the background detection.
+     */
     private void stopActivityTransitionTimer() {
-        if (this.mActivityTransitionTimerTask != null) {
-            this.mActivityTransitionTimerTask.cancel();
-            this.mActivityTransitionTimerTask = null;
+        if (mActivityTransitionTimerTask != null) {
+            mActivityTransitionTimerTask.cancel();
+            mActivityTransitionTimerTask = null;
         }
 
-        if (this.mActivityTransitionTimer != null) {
-            this.mActivityTransitionTimer.cancel();
-            this.mActivityTransitionTimer = null;
+        if (mActivityTransitionTimer != null) {
+            mActivityTransitionTimer.cancel();
+            mActivityTransitionTimer = null;
         }
 
         if (isAppInBackground() && !mIsCallingInBackground) {
@@ -186,9 +259,10 @@ public class VectorApp extends Application {
 
                 // try to perform a GCM registration if it failed
                 // or if the GCM server generated a new push key
-                GcmRegistrationManager gcmRegistrationManager = Matrix.getInstance(this).getSharedGcmRegistrationManager();
+                GcmRegistrationManager gcmRegistrationManager = Matrix.getInstance(this).getSharedGCMRegistrationManager();
+
                 if (null != gcmRegistrationManager) {
-                    gcmRegistrationManager.checkPusherRegistration(this);
+                    gcmRegistrationManager.checkRegistrations();
                 }
             }
 
@@ -198,17 +272,24 @@ public class VectorApp extends Application {
             ArrayList<MXSession> sessions = Matrix.getInstance(this).getSessions();
             for(MXSession session : sessions) {
                 session.getMyUser().refreshUserInfos(null);
+                session.setIsOnline(true);
+                session.setSyncDelay(0);
+                session.setSyncTimeout(0);
             }
         }
 
         MyPresenceManager.advertiseAllOnline();
 
-        this.mIsCallingInBackground = false;
-        this.mIsInBackground = false;
+        mIsCallingInBackground = false;
+        mIsInBackground = false;
     }
 
-    static private Activity mCurrentActivity = null;
-    public static void setCurrentActivity(Activity activity) {
+    /**
+     * Update the current active activity.
+     * It manages the application background / foreground when it is required.
+     * @param activity the current activity, null if there is no more one.
+     */
+    private void setCurrentActivity(Activity activity) {
         if (VectorApp.isAppInBackground() && (null != activity)) {
             Matrix matrixInstance =  Matrix.getInstance(activity.getApplicationContext());
 
@@ -217,8 +298,8 @@ public class VectorApp extends Application {
                 matrixInstance.refreshPushRules();
             }
 
-            Log.e("debackground", "The application is resumed");
-            // display the memory usage when the application is debackgrounded.
+            Log.d(LOG_TAG, "The application is resumed");
+            // display the memory usage when the application is put iun foreground..
             CommonActivityUtils.displayMemoryInformation(activity);
         }
 
@@ -233,6 +314,10 @@ public class VectorApp extends Application {
 
         mCurrentActivity = activity;
     }
+
+    /**
+     * @return the current active activity
+     */
     public static Activity getCurrentActivity() { return mCurrentActivity; }
 
     /**
@@ -243,103 +328,68 @@ public class VectorApp extends Application {
     }
 
     //==============================================================================================================
-    // Google analytics
+    // Calls management.
     //==============================================================================================================
-    /**
-     * Update the GA use.
-     * @param context the context
-     * @param value the new value
-     */
-    public void setUseGA(Context context, boolean value) {
-        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(context);
-        SharedPreferences.Editor editor = preferences.edit();
-        editor.putBoolean(context.getString(R.string.ga_use_settings), value);
-        editor.commit();
-
-        initGoogleAnalytics(context);
-    }
 
     /**
-     * Tells if GA can be used
-     * @param context the context
-     * @return null if not defined, true / false when defined
+     * The application is warned that a call is ended.
      */
-    public Boolean useGA(Context context) {
-        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(context);
-
-        if (preferences.contains(context.getString(R.string.ga_use_settings))) {
-            return preferences.getBoolean(context.getString(R.string.ga_use_settings), false);
-        } else {
-            return null;
+    public void onCallEnd() {
+        if (isAppInBackground() && mIsCallingInBackground) {
+            Log.d(LOG_TAG, "onCallEnd : Suspend the events thread because the call was ended whereas the application was in background");
+            suspendApp();
         }
+
+        mIsCallingInBackground = false;
     }
+
+    //==============================================================================================================
+    // cert management : store the active activities.
+    //==============================================================================================================
+
+    private final EventEmitter<Activity> mOnActivityDestroyedListener = new EventEmitter<>();
 
     /**
-     * Initialize the google analytics
+     * @return the EventEmitter list.
      */
-    public void initGoogleAnalytics(Context context) {
-        Boolean useGA = useGA(context);
-
-        if (null == useGA) {
-            Log.e(LOG_TAG, "Google Analytics use is not yet initialized");
-            return;
-        }
-
-        if (!useGA) {
-            Log.e(LOG_TAG, "The user decides to do not use Google Analytics");
-            return;
-        }
-
-        // pull tracker resource ID from res/values/analytics.xml
-        int trackerResId = getResources().getIdentifier("ga_trackingId", "string", getPackageName());
-        if (trackerResId == 0) {
-            Log.e(LOG_TAG, "Unable to find tracker id for Google Analytics");
-            return;
-        }
-
-        String trackerId = getString(trackerResId);
-        Log.d(LOG_TAG, "Tracker ID: "+trackerId);
-        // init google analytics with this tracker ID
-        if (!TextUtils.isEmpty(trackerId)) {
-            Analytics.initialiseGoogleAnalytics(this, trackerId, new ExceptionParser() {
-                @Override
-                public String getDescription(String threadName, Throwable throwable) {
-                    StringBuilder b = new StringBuilder();
-
-                    b.append("Vector Build : " + VERSION_BUILD + "\n");
-                    b.append("Vector Version : " + VECTOR_VERSION_STRING + "\n");
-                    b.append("SDK Version : " + SDK_VERSION_STRING + "\n");
-                    b.append("Phone : " + Build.MODEL.trim() + " (" + Build.VERSION.INCREMENTAL + " " + Build.VERSION.RELEASE + " " + Build.VERSION.CODENAME + ")\n");
-                    b.append("Thread: ");
-                    b.append(threadName);
-
-                    Activity a = VectorApp.getCurrentActivity();
-                    if (a != null) {
-                        b.append(", Activity:");
-                        b.append(a.getLocalClassName());
-                    }
-
-                    b.append(", Exception: ");
-                    b.append(Analytics.getStackTrace(throwable));
-                    Log.e("FATAL EXCEPTION", b.toString());
-                    return b.toString();
-                }
-            });
-        }
+    public EventEmitter<Activity> getOnActivityDestroyedListener() {
+        return mOnActivityDestroyedListener;
     }
 
+    //==============================================================================================================
+    // Media pickers : image backup
+    //==============================================================================================================
+
+    private static Bitmap mSavedPickerImagePreview = null;
+
+    /**
+     * The image taken from the medias picker is stored in a static variable because
+     * saving it would take too much time.
+     * @return the saved image from medias picker
+     */
     public static Bitmap getSavedPickerImagePreview(){
         return mSavedPickerImagePreview;
     }
 
+    /**
+     * Save the image taken in the medias picker
+     * @param aSavedCameraImagePreview the bitmap.
+     */
     public static void setSavedCameraImagePreview(Bitmap aSavedCameraImagePreview){
         if (aSavedCameraImagePreview != mSavedPickerImagePreview) {
             // force to release memory
-            if (null != mSavedPickerImagePreview) {
+            // reported by GA
+            // it seems that the medias picker might be refreshed
+            // while leaving the activity
+            // recycle the bitmap trigger a rendering issue
+            // Canvas: trying to use a recycled bitmap...
+
+            /*if (null != mSavedPickerImagePreview) {
                 mSavedPickerImagePreview.recycle();
                 mSavedPickerImagePreview = null;
                 System.gc();
-            }
+            }*/
+
 
             mSavedPickerImagePreview = aSavedCameraImagePreview;
         }

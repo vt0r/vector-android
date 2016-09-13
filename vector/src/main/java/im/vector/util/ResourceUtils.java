@@ -15,28 +15,17 @@
  */
 package im.vector.util;
 
-import android.app.Activity;
-import android.content.ContentResolver;
 import android.content.Context;
-import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
-import android.provider.MediaStore;
-import android.provider.OpenableColumns;
 import android.text.TextUtils;
 import android.util.Log;
-import android.view.View;
 import android.webkit.MimeTypeMap;
-import android.widget.Toast;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
 import java.io.InputStream;
-import java.util.List;
 
-import im.vector.R;
+import im.vector.activity.CommonActivityUtils;
 
 /**
  * Static resource utility methods.
@@ -46,12 +35,37 @@ public class ResourceUtils {
     private static final String LOG_TAG = "ResourceUtils";
 
     public static class Resource {
-        public final InputStream contentStream;
-        public final String mimeType;
+        public InputStream mContentStream;
+        public String mMimeType;
 
         public Resource(InputStream contentStream, String mimeType) {
-            this.contentStream = contentStream;
-            this.mimeType = mimeType;
+            this.mContentStream = contentStream;
+            this.mMimeType = mimeType;
+        }
+
+        /**
+         * Close the content stream.
+         */
+        public void close() {
+            try {
+                mMimeType = null;
+
+                if (null != mContentStream) {
+                    mContentStream.close();
+                    mContentStream = null;
+                }
+
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "Resource.close failed " + e.getLocalizedMessage());
+            }
+        }
+
+        /**
+         * Tells if the opened resource is a jpeg one.
+         * @return true if the opened resource is a jpeg one.
+         */
+        public boolean isJpegResource() {
+            return CommonActivityUtils.MIME_TYPE_JPEG.equals(mMimeType) || CommonActivityUtils.MIME_TYPE_JPG.equals(mMimeType);
         }
     }
 
@@ -60,18 +74,22 @@ public class ResourceUtils {
      *
      * @param context the context.
      * @param uri     the URI
+     * @param mimetype the mimetype
      * @return a {@link Resource} encapsulating the opened resource stream and associated metadata
      * or {@code null} if opening the resource stream failed.
      */
-    public static Resource openResource(Context context, Uri uri) {
+    public static Resource openResource(Context context, Uri uri, String mimetype) {
         try {
-            String mimetype = context.getContentResolver().getType(uri);
+            // if the mime type is not provided, try to find it out
+            if (TextUtils.isEmpty(mimetype)) {
+                mimetype = context.getContentResolver().getType(uri);
 
-            // try to find the mimetype from the filename
-            if (null == mimetype) {
-                String extension = MimeTypeMap.getFileExtensionFromUrl(uri.toString().toLowerCase());
-                if (extension != null) {
-                    mimetype = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
+                // try to find the mimetype from the filename
+                if (null == mimetype) {
+                    String extension = MimeTypeMap.getFileExtensionFromUrl(uri.toString().toLowerCase());
+                    if (extension != null) {
+                        mimetype = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
+                    }
                 }
             }
 
@@ -87,74 +105,52 @@ public class ResourceUtils {
     }
 
     /**
-     * Return the thumbnail bitmap from a media Uri
+     * Creates a thumbnail bitmap from a media Uri
      *
      * @param context  the context
      * @param mediaUri the media Uri
+     * @param maxThumbWidth max thumbnail width
+     * @param maxThumbHeight max thumbnail height
      * @return the bitmap.
      */
-    public static Bitmap getThumbnailBitmap(Context context, Uri mediaUri) {
+    public static Bitmap createThumbnailBitmap(Context context, Uri mediaUri, int maxThumbWidth, int maxThumbHeight) {
         Bitmap thumbnailBitmap = null;
-        ResourceUtils.Resource resource = ResourceUtils.openResource(context, mediaUri);
+        ResourceUtils.Resource resource = ResourceUtils.openResource(context, mediaUri, null);
 
         // check if the resource can be i
         if (null == resource) {
             return null;
         }
 
-        if ((null != resource.mimeType) && resource.mimeType.startsWith("image/")) {
-            try {
-                ContentResolver resolver = context.getContentResolver();
+        try {
+             // need to decompress the high res image
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            resource = ResourceUtils.openResource(context, mediaUri, null);
 
-                List uriPath = mediaUri.getPathSegments();
-                long imageId;
-                String lastSegment = (String) uriPath.get(uriPath.size() - 1);
+            // get the full size bitmap
+            Bitmap fullSizeBitmap = null;
 
-                // > Kitkat
-                if (lastSegment.startsWith("image:")) {
-                    lastSegment = lastSegment.substring("image:".length());
+            if (null != resource) {
+                try {
+                    fullSizeBitmap = BitmapFactory.decodeStream(resource.mContentStream, null, options);
+                } catch (Exception e) {
+                    Log.e(LOG_TAG, "BitmapFactory.decodeStream fails " + e.getLocalizedMessage());
                 }
-
-                imageId = Long.parseLong(lastSegment);
-
-                thumbnailBitmap = MediaStore.Images.Thumbnails.getThumbnail(resolver, imageId, MediaStore.Images.Thumbnails.MINI_KIND, null);
-            } catch (Exception e) {
-                Log.e(LOG_TAG, "getThumbnailBitmap " + e.getMessage());
             }
 
-            //
-            double thumbnailWidth = 1024.0;
-            double thumbnailHeight = 1024.0;
+            // succeeds to retrieve the full size bitmap
+            if (null != fullSizeBitmap) {
 
-            // no thumbnail has been found or the mimetype is unknown
-            if ((null == thumbnailBitmap) || (thumbnailBitmap.getHeight() > thumbnailHeight) || (thumbnailBitmap.getWidth() > thumbnailWidth)) {
-                // need to decompress the high res image
-                BitmapFactory.Options options = new BitmapFactory.Options();
-                options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-                resource = ResourceUtils.openResource(context, mediaUri);
+                // the bitmap is smaller that max sizes
+                if ((fullSizeBitmap.getHeight() < maxThumbHeight) && (fullSizeBitmap.getWidth() < maxThumbWidth)) {
+                    thumbnailBitmap = fullSizeBitmap;
+                } else {
+                    double thumbnailWidth = maxThumbWidth;
+                    double thumbnailHeight = maxThumbHeight;
 
-                // get the full size bitmap
-                Bitmap fullSizeBitmap = null;
-
-                if (null == thumbnailBitmap) {
-                    try {
-                        fullSizeBitmap = BitmapFactory.decodeStream(resource.contentStream, null, options);
-                    } catch (Exception e) {
-                        Log.e(LOG_TAG, "BitmapFactory.decodeStream fails " + e.getLocalizedMessage());
-                    }
-                }
-
-                if ((fullSizeBitmap != null) || (thumbnailBitmap != null)) {
-                    double imageWidth;
-                    double imageHeight;
-
-                    if (null == thumbnailBitmap) {
-                        imageWidth = fullSizeBitmap.getWidth();
-                        imageHeight = fullSizeBitmap.getHeight();
-                    } else {
-                        imageWidth = thumbnailBitmap.getWidth();
-                        imageHeight = thumbnailBitmap.getHeight();
-                    }
+                    double imageWidth = fullSizeBitmap.getWidth();
+                    double imageHeight = fullSizeBitmap.getHeight();
 
                     if (imageWidth > imageHeight) {
                         thumbnailHeight = thumbnailWidth * imageHeight / imageWidth;
@@ -165,7 +161,7 @@ public class ResourceUtils {
                     try {
                         thumbnailBitmap = Bitmap.createScaledBitmap((null == fullSizeBitmap) ? thumbnailBitmap : fullSizeBitmap, (int) thumbnailWidth, (int) thumbnailHeight, false);
                     } catch (OutOfMemoryError ex) {
-                        Log.e(LOG_TAG, "Bitmap.createScaledBitmap " + ex.getMessage());
+                        Log.e(LOG_TAG, "createThumbnailBitmap " + ex.getMessage());
                     }
                 }
 
@@ -175,6 +171,13 @@ public class ResourceUtils {
                     System.gc();
                 }
             }
+
+            if (null != resource) {
+                resource.mContentStream.close();
+            }
+
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "createThumbnailBitmap fails " + e.getLocalizedMessage());
         }
 
         return thumbnailBitmap;

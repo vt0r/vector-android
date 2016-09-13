@@ -18,16 +18,23 @@ package im.vector.adapters;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.text.TextUtils;
+import android.widget.ImageView;
 
+import org.matrix.androidsdk.MXSession;
+import org.matrix.androidsdk.data.IMXStore;
 import org.matrix.androidsdk.rest.model.RoomMember;
 import org.matrix.androidsdk.rest.model.User;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
 
 import im.vector.contacts.Contact;
+import im.vector.util.VectorUtils;
 
+// Class representing a room participant.
+public class ParticipantAdapterItem implements java.io.Serializable {
 
-public class ParticipantAdapterItem {
     // displayed info
     public String mDisplayName;
     public String mAvatarUrl;
@@ -41,6 +48,7 @@ public class ParticipantAdapterItem {
     public Contact mContact;
 
     // search fields
+    private ArrayList<String> mDisplayNameComponents;
     private String mLowerCaseDisplayName;
     private String mLowerCaseMatrixId;
 
@@ -51,6 +59,10 @@ public class ParticipantAdapterItem {
     public int mReferenceGroupPosition = -1;
     public int mReferenceChildPosition = -1;
 
+    /**
+     * Constructor from a room member.
+     * @param member the member
+     */
     public ParticipantAdapterItem(RoomMember member) {
         mDisplayName = member.getName();
         mAvatarUrl = member.avatarUrl;
@@ -62,6 +74,10 @@ public class ParticipantAdapterItem {
         initSearchByPatternFields();
     }
 
+    /**
+     * Constructor from a matrix user.
+     * @param user the matrix user.
+     */
     public ParticipantAdapterItem(User user) {
         mDisplayName = TextUtils.isEmpty(user.displayname) ? user.user_id : user.displayname;
         mUserId = user.user_id;
@@ -69,8 +85,17 @@ public class ParticipantAdapterItem {
         initSearchByPatternFields();
     }
 
+    /**
+     * Constructor from a contact.
+     * @param contact the contact.
+     * @param context the context.
+     */
     public ParticipantAdapterItem(Contact contact, Context context) {
         mDisplayName = contact.getDisplayName();
+
+        if (TextUtils.isEmpty(mDisplayName)) {
+            mDisplayName = contact.getContactId();
+        }
         mAvatarBitmap = contact.getThumbnail(context);
 
         mUserId = null;
@@ -81,6 +106,12 @@ public class ParticipantAdapterItem {
         initSearchByPatternFields();
     }
 
+    /**
+     * Constructor from an user information.
+     * @param displayName the display name
+     * @param avatarUrl the avatar url.
+     * @param userId teh userId
+     */
     public ParticipantAdapterItem(String displayName, String avatarUrl, String userId) {
         mDisplayName = displayName;
         mAvatarUrl = avatarUrl;
@@ -98,7 +129,6 @@ public class ParticipantAdapterItem {
         }
 
         if (!TextUtils.isEmpty(mUserId)) {
-
             int sepPos = mUserId.indexOf(":");
 
             if (sepPos > 0) {
@@ -118,10 +148,10 @@ public class ParticipantAdapterItem {
                 mComparisonDisplayName = mUserId;
             }
 
-            mComparisonDisplayName = mComparisonDisplayName.replaceAll(mTrimRegEx, "");
-
             if (null == mComparisonDisplayName) {
                 mComparisonDisplayName = "";
+            } else {
+                mComparisonDisplayName = mComparisonDisplayName.replaceAll(mTrimRegEx, "");
             }
         }
 
@@ -147,12 +177,12 @@ public class ParticipantAdapterItem {
     };
 
     /**
-     * Test if a room member matches with a pattern.
+     * Test if a room member fields contains a dedicated pattern.
      * The check is done with the displayname and the userId.
      * @param aPattern the pattern to search.
      * @return true if it matches.
      */
-    public boolean matchWithPattern(String aPattern) {
+    public boolean contains(String aPattern) {
         if (TextUtils.isEmpty(aPattern)) {
             return false;
         }
@@ -160,11 +190,11 @@ public class ParticipantAdapterItem {
         boolean res = false;
 
         if (/*!res &&*/ !TextUtils.isEmpty(mLowerCaseDisplayName)) {
-            res = mLowerCaseDisplayName.indexOf(aPattern) > -1;
+            res = mLowerCaseDisplayName.contains(aPattern);
         }
 
         if (!res && !TextUtils.isEmpty(mLowerCaseMatrixId)) {
-            res = mLowerCaseMatrixId.indexOf(aPattern) > -1;
+            res = mLowerCaseMatrixId.contains(aPattern);
         }
 
         // the room member class only checks the matrixId and the displayname
@@ -174,42 +204,138 @@ public class ParticipantAdapterItem {
         }*/
 
         if (!res && (null != mContact)) {
-            res = mContact.matchWithPattern(aPattern);
+            res = mContact.contains(aPattern);
         }
 
         return res;
     }
 
     /**
-     * Test if a room member fields matches with a regex
-     * The check is done with the displayname and the userId.
-     * @param aRegEx the pattern to search.
-     * @return true if it matches.
+     * Tell whether a component of the displayName, or one of his matrix id/email has the provided prefix.
+     * @param prefix the prefix
+     * @return true if one item matched
      */
-    public boolean matchWithRegEx(String aRegEx) {
-
-        if (TextUtils.isEmpty(aRegEx)) {
+    public boolean startsWith(String prefix) {
+        //sanity check
+        if (TextUtils.isEmpty(prefix)) {
             return false;
         }
 
-        boolean res = false;
+        // test first the display name
+        if (!TextUtils.isEmpty(mDisplayName)) {
+            // test if it matches without splitting the string.
+            if ((null != mLowerCaseDisplayName) && mLowerCaseDisplayName.startsWith(prefix)) {
+                return true;
+            }
 
-        if (/*!res &&*/ !TextUtils.isEmpty(mDisplayName)) {
-            res = mDisplayName.matches(aRegEx);
+            // build the components list
+            if (null == mDisplayNameComponents) {
+                String[] componentsArrays = mDisplayName.split(" ");
+                mDisplayNameComponents = new ArrayList<>();
+
+                if (componentsArrays.length > 0) {
+                    for (int i = 0; i < componentsArrays.length; i++) {
+                        mDisplayNameComponents.add(componentsArrays[i].trim().toLowerCase());
+                    }
+                }
+            }
+
+            // test components
+            for(String comp : mDisplayNameComponents) {
+                if (comp.startsWith(prefix)) {
+                    return true;
+                }
+            }
         }
 
-        if (!res && !TextUtils.isEmpty(mUserId)) {
-            res = mUserId.matches(aRegEx);
+        // test user id
+        if (!TextUtils.isEmpty(mUserId) && mUserId.startsWith("@" + prefix)) {
+            return true;
         }
 
-        if (!res && (null != mRoomMember)) {
-            res = mRoomMember.matchWithRegEx(aRegEx);
+        return (null != mContact) && mContact.startsWith(prefix);
+    }
+
+    /**
+     * Init an imageView with the avatar.
+     * @param session the session
+     * @param imageView the imageView
+     */
+    public void displayAvatar(MXSession session, ImageView imageView) {
+        // set the
+        if (null != mAvatarBitmap) {
+            imageView.setImageBitmap(mAvatarBitmap);
+        } else {
+            if ((null != mUserId) && (android.util.Patterns.EMAIL_ADDRESS.matcher(mUserId).matches())) {
+                imageView.setImageBitmap(VectorUtils.getAvatar(imageView.getContext(), VectorUtils.getAvatarColor(mUserId), "@@", true));
+            } else {
+                if (TextUtils.isEmpty(mUserId)) {
+                    VectorUtils.loadUserAvatar(imageView.getContext(), session, imageView, mAvatarUrl, mDisplayName, mDisplayName);
+                } else {
+
+                    // try to provide a better display for a participant when the user is known.
+                    if (TextUtils.equals(mUserId, mDisplayName) || TextUtils.isEmpty(mAvatarUrl)) {
+                        IMXStore store = session.getDataHandler().getStore();
+
+                        if (null != store) {
+                            User user = store.getUser(mUserId);
+
+                            if (null != user) {
+                                if (TextUtils.equals(mUserId, mDisplayName) && !TextUtils.isEmpty(user.displayname)) {
+                                    mDisplayName = user.displayname;
+                                }
+
+                                if (null == mAvatarUrl) {
+                                    mAvatarUrl = user.avatar_url;
+                                }
+                            }
+                        }
+                    }
+
+                    VectorUtils.loadUserAvatar(imageView.getContext(), session, imageView, mAvatarUrl, mUserId, mDisplayName);
+                }
+            }
+        }
+    }
+
+    /**
+     * Compute an unique display name.
+     * @param otherDisplayNames the other display names.
+     * @return an unique display name
+     */
+    public String getUniqueDisplayName(List<String> otherDisplayNames) {
+        boolean isMatrixUserId = !android.util.Patterns.EMAIL_ADDRESS.matcher(mUserId).matches();
+
+        // set the display name
+        String displayname = mDisplayName;
+        String lowerCaseDisplayname = displayname.toLowerCase();
+
+        // detect if the username is used by several users
+        int pos = -1;
+
+        if (null != otherDisplayNames) {
+            pos = otherDisplayNames.indexOf(lowerCaseDisplayname);
+
+            if (pos >= 0) {
+                if (pos == otherDisplayNames.lastIndexOf(lowerCaseDisplayname)) {
+                    pos = -1;
+                }
+            }
         }
 
-        if (!res && (null != mContact)) {
-            res = mContact.matchWithRegEx(aRegEx);
+        if ((pos >= 0) && isMatrixUserId) {
+            displayname += " (" + mUserId + ")";
         }
 
-        return res;
+        // if a contact has a matrix id
+        // display the matched email address in the display name
+        if ((null != mContact) && isMatrixUserId) {
+            String firstEmail = mContact.getEmails().get(0);
+
+            if (!TextUtils.equals(displayname, firstEmail)) {
+                displayname += " (" + firstEmail + ")";
+            }
+        }
+        return displayname;
     }
 }

@@ -38,8 +38,12 @@ public class PIDsRetriever {
         void onPIDsRetrieved(String accountId, Contact contact, boolean has3PIDs);
     }
 
+    // current instance
     private static PIDsRetriever mPIDsRetriever = null;
 
+    /**
+     * @return the PIDsRetriever instance.
+     */
     public static PIDsRetriever getIntance() {
         if (null == mPIDsRetriever) {
             mPIDsRetriever = new PIDsRetriever();
@@ -49,10 +53,15 @@ public class PIDsRetriever {
     }
 
     // MatrixID <-> email
-    private HashMap<String, Contact.MXID> mMatrixIdsByElement = new HashMap<String, Contact.MXID>();
+    private final HashMap<String, Contact.MXID> mMatrixIdsByElement = new HashMap<>();
 
+    // listeners list
     private PIDsRetrieverListener mListener = null;
 
+    /**
+     * Set the listener.
+     * @param listener the listener.
+     */
     public void setPIDsRetrieverListener(PIDsRetrieverListener listener) {
         mListener = listener;
     }
@@ -82,11 +91,11 @@ public class PIDsRetriever {
      * @return true if the matrix Ids have been retrieved
      */
     public boolean retrieveMatrixIds(Context context, final Contact contact, boolean localUpdateOnly) {
-        ArrayList<String> requestedAddresses = new ArrayList<String>();
+        ArrayList<String> requestedAddresses = new ArrayList<>();
 
         // check if the emails have only been checked
         // i.e. requested their match PID to the identity server.
-        for(String email : contact.mEmails) {
+        for(String email : contact.getEmails()) {
             if (mMatrixIdsByElement.containsKey(email)) {
                Contact.MXID mxid = mMatrixIdsByElement.get(email);
 
@@ -100,7 +109,7 @@ public class PIDsRetriever {
 
         // the lookup has not been done on some emails
         if ((requestedAddresses.size() > 0) && (!localUpdateOnly)) {
-            ArrayList<String> medias = new ArrayList<String>();
+            ArrayList<String> medias = new ArrayList<>();
 
             for (int index = 0; index < requestedAddresses.size(); index++) {
                 medias.add("email");

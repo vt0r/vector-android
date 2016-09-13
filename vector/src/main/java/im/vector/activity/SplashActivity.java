@@ -25,7 +25,6 @@ import org.matrix.androidsdk.listeners.MXEventListener;
 import im.vector.ErrorListener;
 import im.vector.Matrix;
 import im.vector.R;
-import im.vector.ga.Analytics;
 import im.vector.gcm.GcmRegistrationManager;
 import im.vector.receiver.VectorUniversalLinkReceiver;
 import im.vector.services.EventStreamService;
@@ -41,8 +40,11 @@ public class SplashActivity extends MXCActionBarActivity {
 
     private static final String LOG_TAG = "SplashActivity";
 
+    public static final String EXTRA_MATRIX_ID = "EXTRA_MATRIX_ID";
+    public static final String EXTRA_ROOM_ID = "EXTRA_ROOM_ID";
+
     private Collection<MXSession> mSessions;
-    private GcmRegistrationManager mGcmRegistrationManager;
+    private GcmRegistrationManager mGCMRegistrationManager;
 
     private boolean mInitialSyncComplete = false;
     private boolean mPusherRegistrationComplete = false;
@@ -80,7 +82,7 @@ public class SplashActivity extends MXCActionBarActivity {
 
                 Bundle receivedBundle = getIntent().getExtras();
 
-                if(null != receivedBundle) {
+                if (null != receivedBundle) {
                     intent.putExtras(receivedBundle);
                 }
 
@@ -94,8 +96,15 @@ public class SplashActivity extends MXCActionBarActivity {
                     intent.putExtra(VectorHomeActivity.EXTRA_SHARED_INTENT_PARAMS, getIntent().getParcelableExtra(VectorHomeActivity.EXTRA_SHARED_INTENT_PARAMS));
                 }
 
-                startActivity(intent);
+                if (getIntent().hasExtra(EXTRA_ROOM_ID) && getIntent().hasExtra(EXTRA_MATRIX_ID)) {
+                    HashMap<String, Object> params = new HashMap<String, Object>();
 
+                    params.put(VectorRoomActivity.EXTRA_MATRIX_ID, getIntent().getStringExtra(EXTRA_MATRIX_ID));
+                    params.put(VectorRoomActivity.EXTRA_ROOM_ID, getIntent().getStringExtra(EXTRA_ROOM_ID));
+                    intent.putExtra(VectorHomeActivity.EXTRA_JUMP_TO_ROOM_PARAMS, params);
+                }
+
+                startActivity(intent);
                 SplashActivity.this.finish();
             } else {
                 CommonActivityUtils.logout(this);
@@ -149,8 +158,6 @@ public class SplashActivity extends MXCActionBarActivity {
                         noMoreListener = mInitialSyncComplete = (mListeners.size() == 0);
                     }
 
-                    Analytics.sendEvent("Account", "Loading", fSession.getDataHandler().getStore().getRooms().size() + " rooms", System.currentTimeMillis() - startTime);
-
                     if (noMoreListener) {
                         finishIfReady();
                     }
@@ -191,41 +198,15 @@ public class SplashActivity extends MXCActionBarActivity {
             EventStreamService.getInstance().startAccounts(matrixIds);
         }
 
-        mGcmRegistrationManager = Matrix.getInstance(getApplicationContext())
-                .getSharedGcmRegistrationManager();
-        mPusherRegistrationComplete = mGcmRegistrationManager.isGCMRegistred();
+        mGCMRegistrationManager = Matrix.getInstance(getApplicationContext()).getSharedGCMRegistrationManager();
+        mPusherRegistrationComplete = mGCMRegistrationManager.isGCMRegistred();
 
         if (!mPusherRegistrationComplete) {
-            mGcmRegistrationManager.registerPusher(getApplicationContext(), new GcmRegistrationManager.GcmRegistrationIdListener() {
-                @Override
-                public void onPusherRegistered() {
-                    Log.d(LOG_TAG, "The GCM registration is done");
-
-                    // vector always uses GCM.
-                    // there is no way to enable / disable it in the application settings
-
-                    if (!Matrix.getInstance(SplashActivity.this).getSharedGcmRegistrationManager().useGCM()) {
-                        Matrix.getInstance(SplashActivity.this).getSharedGcmRegistrationManager().setUseGCM(true);
-
-                        SplashActivity.this.runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                CommonActivityUtils.onGcmUpdate(SplashActivity.this);
-                            }
-                        });
-                    }
-
-                    mPusherRegistrationComplete = true;
-                    finishIfReady();
-                }
-
-                @Override
-                public void onPusherRegistrationFailed() {
-                    Log.d(LOG_TAG, "The GCM registration failed");
-
-                    // fallback to the events service
-                    Matrix.getInstance(SplashActivity.this).getSharedGcmRegistrationManager().setUseGCM(false);
-
+            mGCMRegistrationManager.registerToGCM(new GcmRegistrationManager.GCMRegistrationListener() {
+                /**
+                 * Common behaviour.
+                 */
+                private void onDone() {
                     SplashActivity.this.runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
@@ -233,12 +214,24 @@ public class SplashActivity extends MXCActionBarActivity {
                         }
                     });
 
-                    // can register it ignore
-                    onPusherRegistered();
+                    mPusherRegistrationComplete = true;
+                    finishIfReady();
+                }
+
+                @Override
+                public void onGCMRegistered() {
+                    Log.d(LOG_TAG, "The GCM registration is done");
+                    onDone();
+                }
+
+                @Override
+                public void onGCMRegistrationFailed() {
+                    Log.d(LOG_TAG, "The GCM registration failed");
+                    onDone();
                 }
             });
-        } else if (mGcmRegistrationManager.useGCM()) {
-            mGcmRegistrationManager.reregisterSessions(SplashActivity.this, null);
+        } else if (mGCMRegistrationManager.useGCM()) {
+            mGCMRegistrationManager.forceSessionsRegistration(null);
         }
 
         boolean noUpdate;

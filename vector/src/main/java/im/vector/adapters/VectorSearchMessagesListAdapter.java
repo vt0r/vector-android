@@ -63,7 +63,7 @@ public class VectorSearchMessagesListAdapter extends VectorMessagesAdapter {
 
         setNotifyOnChange(true);
         mDisplayRoomName = displayRoomName;
-        searchHighlightColor = context.getResources().getColor(R.color.vector_green_color);
+        mSearchHighlightMessageTextColor = context.getResources().getColor(R.color.vector_green_color);
     }
 
     /**
@@ -78,16 +78,10 @@ public class VectorSearchMessagesListAdapter extends VectorMessagesAdapter {
      * Highlight text style
      */
     protected CharacterStyle getHighLightTextStyle() {
-        return new BackgroundColorSpan(searchHighlightColor);
+        return new BackgroundColorSpan(mSearchHighlightMessageTextColor);
     }
 
-    /**
-     *
-     * @param event
-     * @param position
-     * @param shouldBeMerged
-     * @return
-     */
+    @Override
     protected boolean mergeView(Event event, int position, boolean shouldBeMerged) {
         return false;
     }
@@ -130,7 +124,14 @@ public class VectorSearchMessagesListAdapter extends VectorMessagesAdapter {
         if (msgContent.has("avatar_url")) {
             url = msgContent.get("avatar_url") == JsonNull.INSTANCE ? null : msgContent.get("avatar_url").getAsString();
         }
-        loadMemberAvatar(avatarView, sender, event.getSender(), url);
+
+        String displayName = null;
+        //
+        if (msgContent.has("displayname")) {
+            displayName = msgContent.get("displayname") == JsonNull.INSTANCE ? null : msgContent.get("displayname").getAsString();
+        }
+
+        loadMemberAvatar(avatarView, sender, event.getSender(), displayName, url);
 
         // display the sender
         TextView senderTextView = (TextView) convertView.findViewById(org.matrix.androidsdk.R.id.messagesAdapter_sender);
@@ -165,7 +166,7 @@ public class VectorSearchMessagesListAdapter extends VectorMessagesAdapter {
 
         if (mDisplayRoomName) {
             TextView roomTextView = (TextView) convertView.findViewById(R.id.messagesAdapter_message_room_name_textview);
-            roomTextView.setText(VectorUtils.getRoomDisplayname(mContext, mSession, room));
+            roomTextView.setText(VectorUtils.getRoomDisplayName(mContext, mSession, room));
         }
 
         // display the day

@@ -39,20 +39,20 @@ import im.vector.activity.VectorBaseSearchActivity;
 import im.vector.activity.VectorMemberDetailsActivity;
 
 import im.vector.adapters.ParticipantAdapterItem;
-import im.vector.adapters.VectorAddParticipantsAdapter;
+import im.vector.adapters.VectorParticipantsAdapter;
 import im.vector.contacts.Contact;
 import im.vector.contacts.ContactsManager;
 
 
-public class VectorSearchPeopleListFragment extends Fragment {
+public class  VectorSearchPeopleListFragment extends Fragment {
 
-    public static final String ARG_MATRIX_ID = "VectorSearchPeopleListFragment.ARG_MATRIX_ID";
-    public static final String ARG_LAYOUT_ID = "VectorSearchPeopleListFragment.ARG_LAYOUT_ID";
+    private static final String ARG_MATRIX_ID = "VectorSearchPeopleListFragment.ARG_MATRIX_ID";
+    private static final String ARG_LAYOUT_ID = "VectorSearchPeopleListFragment.ARG_LAYOUT_ID";
 
     // the session
     private MXSession mSession;
     private ListView mPeopleListView;
-    private VectorAddParticipantsAdapter mAdapter;
+    private VectorParticipantsAdapter mAdapter;
 
     // pending requests
     // a request might be called whereas the fragment is not initialized
@@ -62,10 +62,17 @@ public class VectorSearchPeopleListFragment extends Fragment {
 
     // contacts manager listener
     // detect if a contact is a matrix user
-    private ContactsManager.ContactsManagerListener mContactsListener = new ContactsManager.ContactsManagerListener() {
+    private final ContactsManager.ContactsManagerListener mContactsListener = new ContactsManager.ContactsManagerListener() {
         @Override
         public void onRefresh() {
-            mAdapter.notifyDataSetChanged();
+            if (null != getActivity()) {
+                getActivity().runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        mAdapter.notifyDataSetChanged();
+                    }
+                });
+            }
         }
 
         @Override
@@ -74,16 +81,7 @@ public class VectorSearchPeopleListFragment extends Fragment {
                 getActivity().runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        int firstIndex = mPeopleListView.getFirstVisiblePosition();
-                        int lastIndex = mPeopleListView.getLastVisiblePosition();
-
-                        for(int index = firstIndex; index <= lastIndex; index++) {
-                            if (mAdapter.getItem(index).mContact == contact) {
-                                mAdapter.getItem(index).mUserId = matrixId;
-                                mAdapter.notifyDataSetChanged();
-                                break;
-                            }
-                        }
+                        mAdapter.onContactUpdate(contact, matrixId, mPeopleListView.getFirstVisiblePosition(), mPeopleListView.getLastVisiblePosition());
                     }
                 });
             }
@@ -91,7 +89,7 @@ public class VectorSearchPeopleListFragment extends Fragment {
     };
 
     // refresh the presence asap
-    private MXEventListener mEventsListener = new MXEventListener() {
+    private final MXEventListener mEventsListener = new MXEventListener() {
         @Override
         public void onPresenceUpdate(final Event event, final User user) {
             if (null != getActivity()) {
@@ -143,7 +141,7 @@ public class VectorSearchPeopleListFragment extends Fragment {
 
         View v = inflater.inflate(args.getInt(ARG_LAYOUT_ID), container, false);
         mPeopleListView = (ListView)v.findViewById(R.id.search_people_list);
-        mAdapter = new VectorAddParticipantsAdapter(getActivity(), R.layout.adapter_item_vector_add_participants, mSession, null);
+        mAdapter = new VectorParticipantsAdapter(getActivity(), R.layout.adapter_item_vector_add_participants, mSession, null);
         mPeopleListView.setAdapter(mAdapter);
 
         mPeopleListView.setOnItemClickListener(new AdapterView.OnItemClickListener() {
@@ -162,9 +160,16 @@ public class VectorSearchPeopleListFragment extends Fragment {
     }
 
     /**
+     * @return true if the local search is ready to start.
+     */
+    public boolean isReady() {
+        return mAdapter.isKnownMembersInitialized();
+    }
+
+    /**
      * Search a pattern in the room
-     * @param pattern
-     * @param onSearchResultListener
+     * @param pattern the pattern to search
+     * @param onSearchResultListener the result listener
      */
     public void searchPattern(final String pattern, final MatrixMessageListFragment.OnSearchResultListener onSearchResultListener) {
         if (null == mPeopleListView) {
@@ -182,7 +187,7 @@ public class VectorSearchPeopleListFragment extends Fragment {
                 }
             });
         } else {
-            mAdapter.setSearchedPattern(pattern, new VectorAddParticipantsAdapter.OnParticipantsSearchListener() {
+            mAdapter.setSearchedPattern(pattern, VectorParticipantsAdapter.SEARCH_METHOD_CONTAINS, new VectorParticipantsAdapter.OnParticipantsSearchListener() {
                 @Override
                 public void onSearchEnd(final int count) {
                     mPeopleListView.post(new Runnable() {

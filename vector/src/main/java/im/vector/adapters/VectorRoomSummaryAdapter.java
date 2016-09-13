@@ -100,6 +100,8 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
     private boolean mIsSearchMode;
     // when set to true, avoid empty history by displaying the directory group
     private boolean mDisplayDirectoryGroupWhenEmpty;
+    // force to display the directory group
+    private boolean mForceDirectoryGroupDisplay;
 
     // public room search
     private List<PublicRoom> mPublicRooms;
@@ -135,6 +137,14 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
 
         mIsSearchMode = isSearchMode;
         mDisplayDirectoryGroupWhenEmpty = displayDirectoryGroupWhenEmpty;
+    }
+
+    /**
+     * Set to true to always display the directory group.
+     * @param forceDirectoryGroupDisplay
+     */
+    public void setForceDirectoryGroupDisplay(boolean forceDirectoryGroupDisplay) {
+        mForceDirectoryGroupDisplay = forceDirectoryGroupDisplay;
     }
 
     /**
@@ -215,7 +225,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
             res = false;
 
             if (!TextUtils.isEmpty(mSearchedPattern)) {
-                String roomName = VectorUtils.getRoomDisplayname(mContext, mMxSession, room);
+                String roomName = VectorUtils.getRoomDisplayName(mContext, mMxSession, room);
                 res = (!TextUtils.isEmpty(roomName) && (roomName.toLowerCase().indexOf(mSearchedPattern) >= 0));
             }
         }
@@ -257,6 +267,13 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
      */
     public boolean isDirectoryGroupPosition(int groupPosition) {
         return (mDirectoryGroupPosition == groupPosition);
+    }
+
+    /**
+     * @return the directory group position
+     */
+    public int getDirectoryGroupPosition() {
+        return mDirectoryGroupPosition;
     }
 
     /**
@@ -354,7 +371,8 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
                 Room room = mMxSession.getDataHandler().getStore().getRoom(roomSummaryId);
 
                 // check if the room exists
-                if ((null != room) && isMatchedPattern(room)) {
+                // the user conference rooms are not displayed.
+                if ((null != room) && isMatchedPattern(room) && !room.isConferenceUserRoom()) {
                     // list first the summary
                     if (room.isInvited()) {
                         inviteRoomSummaryList.add(roomSummary);
@@ -387,7 +405,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
 
             // in search mode
             // the public rooms have a dedicated section
-            if (mIsSearchMode || mDisplayDirectoryGroupWhenEmpty) {
+            if (mIsSearchMode || mDisplayDirectoryGroupWhenEmpty || mForceDirectoryGroupDisplay) {
                 mMatchedPublicRooms = new ArrayList<PublicRoom>();
 
                 if (null != mPublicRooms) {
@@ -468,7 +486,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
 
             // in avoiding empty history mode
             // check if there is really nothing else
-            if (mDisplayDirectoryGroupWhenEmpty && (groupIndex > 1)) {
+            if (mDisplayDirectoryGroupWhenEmpty && !mForceDirectoryGroupDisplay && (groupIndex > 1)) {
                 summaryListByGroupsRetValue.remove(mDirectoryGroupPosition);
                 mRoomByAliasGroupPosition = -1;
                 mDirectoryGroupPosition = -1;
@@ -506,7 +524,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
         if(null != roomSummary) {
             Room room = this.roomFromRoomSummary(roomSummary);
             if(null != room) {
-                room.sendReadReceipt();
+                room.sendReadReceipt(null);
             }
 
             // reset the highlight
@@ -621,13 +639,13 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
                     int retValue;
                     long deltaTimestamp;
 
-                    if((null == aLeftObj) || (null == aLeftObj.getLatestEvent())){
+                    if((null == aLeftObj) || (null == aLeftObj.getLatestReceivedEvent())){
                         retValue = 1;
                     }
-                    else if((null == aRightObj) || (null == aRightObj.getLatestEvent())){
+                    else if((null == aRightObj) || (null == aRightObj.getLatestReceivedEvent())){
                         retValue = -1;
                     }
-                    else if((deltaTimestamp = aRightObj.getLatestEvent().getOriginServerTs() - aLeftObj.getLatestEvent().getOriginServerTs()) > 0) {
+                    else if((deltaTimestamp = aRightObj.getLatestReceivedEvent().getOriginServerTs() - aLeftObj.getLatestReceivedEvent().getOriginServerTs()) > 0) {
                         retValue = 1;
                     }
                     else if (deltaTimestamp < 0) {
@@ -760,7 +778,6 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
 
         int roomNameBlack = mContext.getResources().getColor(R.color.vector_text_black_color);
         int fushiaColor = mContext.getResources().getColor(R.color.vector_fuchsia_color);
-        int vectorDarkGreyColor = mContext.getResources().getColor(R.color.vector_4d_gray);
         int vectorDefaultTimeStampColor = mContext.getResources().getColor(R.color.vector_0_54_black_color);
         int vectorGreenColor = mContext.getResources().getColor(R.color.vector_green_color);
         int vectorSilverColor = mContext.getResources().getColor(R.color.vector_silver_color);
@@ -797,6 +814,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
             separatorGroupView.setVisibility(View.VISIBLE);
             showMoreView.setVisibility(View.VISIBLE);
             actionClickArea.setVisibility(View.GONE);
+            unreadCountTxtView.setVisibility(View.GONE);
 
             if (mDirectoryGroupPosition == groupPosition) {
                 if (null == mPublicRooms) {
@@ -820,11 +838,11 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
                     }
                 }
 
-                avatarImageView.setImageBitmap(VectorUtils.getAvatar(avatarImageView.getContext(), VectorUtils.getAvatarcolor(null), null, true));
+                avatarImageView.setImageBitmap(VectorUtils.getAvatar(avatarImageView.getContext(), VectorUtils.getAvatarColor(null), null, true));
             } else {
                 roomNameTxtView.setText(mSearchedPattern);
                 roomMsgTxtView.setText("");
-                avatarImageView.setImageBitmap(VectorUtils.getAvatar(avatarImageView.getContext(), VectorUtils.getAvatarcolor(null), "@", true));
+                avatarImageView.setImageBitmap(VectorUtils.getAvatar(avatarImageView.getContext(), VectorUtils.getAvatarColor(null), "@", true));
             }
 
             return convertView;
@@ -848,7 +866,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
 
         // display the room avatar
         avatarImageView.setBackgroundColor(mContext.getResources().getColor(android.R.color.transparent));
-        final String roomName = VectorUtils.getRoomDisplayname(mContext, mMxSession, childRoom);
+        final String roomName = VectorUtils.getRoomDisplayName(mContext, mMxSession, childRoom);
         VectorUtils.loadRoomAvatar(mContext, mMxSession, avatarImageView, childRoom);
 
         // display the room name
@@ -860,7 +878,7 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
         roomMsgTxtView.setText(lastMsgToDisplay);
 
         // set the timestamp
-        timestampTxtView.setText(getFormattedTimestamp(childRoomSummary.getLatestEvent()));
+        timestampTxtView.setText(getFormattedTimestamp(childRoomSummary.getLatestReceivedEvent()));
         timestampTxtView.setTextColor(vectorDefaultTimeStampColor);
         timestampTxtView.setTypeface(null, Typeface.NORMAL);
 
@@ -895,8 +913,6 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
         }
 
         bingUnreadMsgView.setVisibility(isInvited ? View.INVISIBLE : View.VISIBLE);
-        timestampTxtView.setVisibility((isInvited || mIsSearchMode) ? View.INVISIBLE : View.VISIBLE);
-        actionImageView.setVisibility((isInvited || mIsSearchMode) ? View.INVISIBLE : View.VISIBLE);
         invitationView.setVisibility(isInvited ? View.VISIBLE : View.GONE);
 
         final String fRoomId = childRoomSummary.getRoomId();
@@ -921,6 +937,14 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
                     }
                 }
             });
+
+            // display an exclamation mark like the webclient
+            unreadCountTxtView.setVisibility(View.VISIBLE);
+            unreadCountTxtView.setText("!");
+            unreadCountTxtView.setTypeface(null, Typeface.BOLD);
+            setUnreadBackground(unreadCountTxtView, fushiaColor);
+            timestampTxtView.setVisibility(View.GONE);
+            actionImageView.setVisibility(View.GONE);
         } else {
 
             final boolean isFavorite = groupPosition == mFavouritesGroupPosition;
@@ -933,6 +957,9 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
                     displayPopupMenu(childRoom, actionView, isFavorite, isLowPrior);
                 }
             });
+
+            timestampTxtView.setVisibility(mIsSearchMode ? View.INVISIBLE : View.VISIBLE);
+            actionImageView.setVisibility(mIsSearchMode ? View.INVISIBLE : View.VISIBLE);
         }
 
         separatorView.setVisibility(isLastChild ? View.GONE : View.VISIBLE);
@@ -1066,13 +1093,18 @@ public class VectorRoomSummaryAdapter extends BaseExpandableListAdapter {
         return displayNameRetValue;
     }
 
+    /**
+     * Retrieves the text to display for a RoomSummary.
+     * @param aChildRoomSummary the roomSummary.
+     * @return the text to display.
+     */
     private CharSequence getChildMessageToDisplay(RoomSummary aChildRoomSummary) {
-        CharSequence messageToDisplayRetValue=null;
+        CharSequence messageToDisplayRetValue = null;
         EventDisplay eventDisplay;
 
         if (null != aChildRoomSummary) {
-            if (aChildRoomSummary.getLatestEvent() != null) {
-                eventDisplay = new EventDisplay(mContext, aChildRoomSummary.getLatestEvent(), aChildRoomSummary.getLatestRoomState());
+            if (aChildRoomSummary.getLatestReceivedEvent() != null) {
+                eventDisplay = new EventDisplay(mContext, aChildRoomSummary.getLatestReceivedEvent(), aChildRoomSummary.getLatestRoomState());
                 eventDisplay.setPrependMessagesWithAuthor(true);
                 messageToDisplayRetValue = eventDisplay.getTextualDisplay(mContext.getResources().getColor(R.color.vector_text_gray_color));
             }

@@ -62,6 +62,11 @@ public class VectorRoomMessagesSearchActivity extends VectorBaseSearchActivity {
             return;
         }
 
+        if (CommonActivityUtils.isGoingToSplash(this)) {
+            Log.d(LOG_TAG, "onCreate : Going to splash screen");
+            return;
+        }
+
         Intent intent = getIntent();
 
         mSession = getSession(intent);
@@ -94,9 +99,11 @@ public class VectorRoomMessagesSearchActivity extends VectorBaseSearchActivity {
     }
 
 
-    // inherited from VectorBaseSearchActivity
-    protected void onPatternUpdate() {
-        onSearchFragmentResume();
+    @Override
+    protected void onPatternUpdate(boolean isTypingUpdate) {
+        if (!isTypingUpdate) {
+            onSearchFragmentResume();
+        }
     }
 
     /**
@@ -129,7 +136,7 @@ public class VectorRoomMessagesSearchActivity extends VectorBaseSearchActivity {
      * Called by the fragments when they are resumed.
      * It is used to refresh the search while playing with the tab.
      */
-    public void onSearchFragmentResume() {
+    private void onSearchFragmentResume() {
         resetUi();
 
         String pattern = mPatternToSearchEditText.getText().toString();
@@ -159,19 +166,16 @@ public class VectorRoomMessagesSearchActivity extends VectorBaseSearchActivity {
      */
     private void onSearchEnd(int nbrMessages) {
         Log.d(LOG_TAG, "## onSearchEnd() nbrMsg=" + nbrMessages);
+
         // stop "wait while searching" screen
         mWaitWhileSearchInProgressView.setVisibility(View.GONE);
 
-        // display the background only if there is no result
-        if (0 == nbrMessages) {
-            mBackgroundImageView.setVisibility(View.VISIBLE);
-        } else {
-            mBackgroundImageView.setVisibility(View.GONE);
-        }
+        // display the background view if there is no pending such
+        mBackgroundImageView.setVisibility((0 == nbrMessages) && TextUtils.isEmpty(mPatternToSearchEditText.getText().toString()) ? View.VISIBLE : View.GONE);
+
 
         // display the "no result" text only if the researched text is not empty
         mNoResultsTxtView.setVisibility(((0 == nbrMessages) && !TextUtils.isEmpty(mPatternToSearchEditText.getText().toString())) ? View.VISIBLE : View.GONE);
-
     }
 }
 

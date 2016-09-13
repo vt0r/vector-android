@@ -23,16 +23,20 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.preference.EditTextPreference;
 import android.preference.Preference;
 import android.preference.PreferenceCategory;
 import android.preference.PreferenceFragment;
 import android.preference.PreferenceManager;
+import android.preference.PreferenceScreen;
 import android.preference.SwitchPreference;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.View;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
@@ -40,45 +44,52 @@ import android.widget.EditText;
 import android.widget.Toast;
 
 import com.google.gson.JsonElement;
-import com.google.gson.JsonPrimitive;
 
 import org.matrix.androidsdk.MXSession;
 import org.matrix.androidsdk.data.MyUser;
 import org.matrix.androidsdk.data.Pusher;
 import org.matrix.androidsdk.listeners.IMXNetworkEventListener;
 import org.matrix.androidsdk.listeners.MXEventListener;
+import org.matrix.androidsdk.listeners.MXMediaUploadListener;
 import org.matrix.androidsdk.rest.callback.ApiCallback;
 import org.matrix.androidsdk.rest.callback.SimpleApiCallback;
-import org.matrix.androidsdk.rest.model.ContentResponse;
 import org.matrix.androidsdk.rest.model.MatrixError;
 import org.matrix.androidsdk.rest.model.ThreePid;
 import org.matrix.androidsdk.rest.model.bingrules.BingRule;
 import org.matrix.androidsdk.rest.model.bingrules.BingRuleSet;
 import org.matrix.androidsdk.util.BingRulesManager;
-import org.matrix.androidsdk.util.ContentManager;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 
 import im.vector.Matrix;
 import im.vector.R;
 import im.vector.VectorApp;
-import im.vector.activity.CommonActivityUtils;
 import im.vector.activity.VectorMediasPickerActivity;
+import im.vector.contacts.ContactsManager;
+import im.vector.ga.GAHelper;
 import im.vector.gcm.GcmRegistrationManager;
 import im.vector.preference.UserAvatarPreference;
 import im.vector.preference.VectorCustomActionEditTextPreference;
 import im.vector.util.ResourceUtils;
 import im.vector.util.VectorUtils;
 
-public class VectorSettingsPreferencesFragment extends PreferenceFragment {
+public class VectorSettingsPreferencesFragment extends PreferenceFragment implements SharedPreferences.OnSharedPreferenceChangeListener{
+    private static final String LOG_TAG = "VPreferenceFragment";
+
     // arguments indexes
     private static final String ARG_MATRIX_ID = "VectorSettingsPreferencesFragment.ARG_MATRIX_ID";
 
-    private static final String EMAIL_PREREFENCE_KEY_BASE = "EMAIL_PREREFENCE_KEY_BASE";
-    private static final String PUSHER_PREREFENCE_KEY_BASE = "PUSHER_PREREFENCE_KEY_BASE";
+    private static final String EMAIL_PREFERENCE_KEY_BASE = "EMAIL_PREFERENCE_KEY_BASE";
+    private static final String PUSHER_PREFERENCE_KEY_BASE = "PUSHER_PREFERENCE_KEY_BASE";
+    private static final String IGNORED_USER_KEY_BASE = "IGNORED_USER_KEY_BASE";
     private static final String ADD_EMAIL_PREFERENCE_KEY = "ADD_EMAIL_PREFERENCE_KEY";
+    private static final String APP_INFO_LINK_PREFERENCE_KEY = "application_info_link";
+
+    private static final String DUMMY_RULE = "DUMMY_RULE";
 
     // members
     private MXSession mSession;
@@ -88,7 +99,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
     private static HashMap<String, String> mPushesRuleByResourceId = null;
 
     // disable some updates if there is
-    private IMXNetworkEventListener mNetworkListener = new IMXNetworkEventListener() {
+    private final IMXNetworkEventListener mNetworkListener = new IMXNetworkEventListener() {
         @Override
         public void onNetworkConnectionUpdate(boolean isConnected) {
             refreshDisplay();
@@ -97,14 +108,22 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
     // displayed emails
     private PreferenceCategory mUserSettingsCategory;
-    private List<String> mDisplayedEmails = new ArrayList<String>();
+    private List<String> mDisplayedEmails = new ArrayList<>();
 
     // displayed pushers
     private PreferenceCategory mPushersSettingsCategory;
-    private List<Pusher> mDisplayedPushers = new ArrayList<Pusher>();
+    private List<Pusher> mDisplayedPushers = new ArrayList<>();
+
+    // displayed the ignored users list
+    private PreferenceCategory mIgnoredUserSettingsCategory;
+
+    // background sync category
+    private PreferenceCategory mBackgroundSyncCategory;
+    private EditTextPreference mSyncRequestTimeoutPreference;
+    private EditTextPreference mSyncRequestDelayPreference;
 
     // events listener
-    private MXEventListener mEventsListener = new MXEventListener() {
+    private final MXEventListener mEventsListener = new MXEventListener() {
         @Override
         public void onBingRulesUpdate() {
             refreshPreferences();
@@ -141,13 +160,23 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
         String matrixId = args.getString(ARG_MATRIX_ID);
         mSession = Matrix.getInstance(getActivity()).getSession(matrixId);
 
+        // sanity checks
+        if (null == mSession) {
+            if (null != getActivity()) {
+                getActivity().finish();
+            }
+            return;
+        }
+
         // define the layout
         addPreferencesFromResource(R.xml.vector_settings_preferences);
 
         if (null == mPushesRuleByResourceId) {
-            mPushesRuleByResourceId = new HashMap<String, String>();
+            mPushesRuleByResourceId = new HashMap<>();
 
             mPushesRuleByResourceId.put(getResources().getString(R.string.settings_enable_all_notif), BingRule.RULE_ID_DISABLE_ALL);
+            mPushesRuleByResourceId.put(getResources().getString(R.string.settings_enable_this_device), DUMMY_RULE);
+            mPushesRuleByResourceId.put(getResources().getString(R.string.settings_turn_screen_on), DUMMY_RULE);
             mPushesRuleByResourceId.put(getResources().getString(R.string.settings_containing_my_name), BingRule.RULE_ID_CONTAIN_DISPLAY_NAME);
             mPushesRuleByResourceId.put(getResources().getString(R.string.settings_messages_in_one_to_one), BingRule.RULE_ID_ONE_TO_ONE_ROOM);
             mPushesRuleByResourceId.put(getResources().getString(R.string.settings_messages_in_group_chat), BingRule.RULE_ID_ALL_OTHER_MESSAGES_ROOMS);
@@ -215,7 +244,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
         }
 
         // terms & conditions
-        EditTextPreference privacyPreference = (EditTextPreference)preferenceManager.findPreference(getActivity().getResources().getString(R.string.settings_privacy_policy));
+        EditTextPreference privacyPreference = (EditTextPreference)preferenceManager.findPreference(getActivity().getResources().getString(R.string.room_sliding_privacy_policy));
 
         if (null != termConditionsPreference) {
             privacyPreference.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
@@ -245,7 +274,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
         displaynamePref.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
             @Override
             public boolean onPreferenceChange(Preference preference, Object newValue) {
-                onDisplayNameClick((String) newValue);
+                onDisplayNameClick((null == newValue) ? null : ((String)newValue).trim());
                 return false;
             }
         });
@@ -255,53 +284,118 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
             final SwitchPreference switchPreference = (SwitchPreference)preferenceManager.findPreference(resourceText);
 
             if (null != switchPreference) {
-                final String fResourceText = resourceText;
-
                 switchPreference.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
                     @Override
                     public boolean onPreferenceChange(Preference preference, Object newValueAsVoid) {
                         // on some old android APIs,
                         // the callback is called even if there is no user interaction
                         // so the value will be checked to ensure there is really no update.
-                        onPushRuleClick(fResourceText, (boolean)newValueAsVoid);
+                        onPushRuleClick(preference.getKey(), (boolean)newValueAsVoid);
                         return true;
                     }
                 });
             }
         }
 
-        final SwitchPreference useGaPref = (SwitchPreference)preferenceManager.findPreference(getActivity().getResources().getString(R.string.ga_use_settings));
-        useGaPref.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
-            @Override
-            public boolean onPreferenceChange(Preference preference, Object newValue) {
-                Boolean useGA = VectorApp.getInstance().useGA(getActivity());
-                boolean newGa = (boolean)newValue;
+        final SwitchPreference useBackgroundSyncPref = (SwitchPreference)preferenceManager.findPreference(getActivity().getResources().getString(R.string.settings_enable_background_sync));
 
-                if ((null != useGA) && (useGA != newGa)) {
-                    if (!newGa) {
-                        AlertDialog.Builder builder = new AlertDialog.Builder(getActivity());
+        if (null != useBackgroundSyncPref) {
+            final GcmRegistrationManager gcmMgr = Matrix.getInstance(getActivity()).getSharedGCMRegistrationManager();
 
-                        builder.setMessage(getString(R.string.ga_use_disable_alert_message)).setPositiveButton(getString(R.string.ok), new DialogInterface.OnClickListener() {
-                            @Override
-                            public void onClick(DialogInterface dialog, int which) {
-                                // do something here
-                            }
-                        }).show();
+            useBackgroundSyncPref.setChecked(gcmMgr.isBackgroundSyncAllowed());
+
+            useBackgroundSyncPref.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object aNewValue) {
+                    boolean newValue = (boolean)aNewValue;
+
+                    if (newValue != gcmMgr.isBackgroundSyncAllowed()) {
+                        gcmMgr.setBackgroundSyncAllowed(newValue);
                     }
-                    VectorApp.getInstance().setUseGA(getActivity(), newGa);
+
+                    return true;
+                }
+            });
+        }
+        
+        final SwitchPreference useGaPref = (SwitchPreference)preferenceManager.findPreference(getActivity().getResources().getString(R.string.ga_use_settings));
+
+        if (!GAHelper.isGAUseUpdatable()) {
+            PreferenceCategory otherCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_other));
+            otherCategory.removePreference(useGaPref);
+        } else {
+            useGaPref.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    Boolean useGA = GAHelper.useGA(getActivity());
+                    boolean newGa = (boolean) newValue;
+
+                    if ((null != useGA) && (useGA != newGa)) {
+                        if (!newGa) {
+                            AlertDialog.Builder builder = new AlertDialog.Builder(getActivity());
+
+                            builder.setMessage(getString(R.string.ga_use_disable_alert_message)).setPositiveButton(getString(R.string.ok), new DialogInterface.OnClickListener() {
+                                @Override
+                                public void onClick(DialogInterface dialog, int which) {
+                                    // do something here
+                                }
+                            }).show();
+                        }
+                        GAHelper.setUseGA(getActivity(), newGa);
+                    }
+
+                    return true;
+                }
+            });
+        }
+
+        mUserSettingsCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_user_settings));
+        mPushersSettingsCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_notifications_targets));
+        mIgnoredUserSettingsCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_ignored_users));
+
+        // preference to start the App info screen, to facilitate App permissions access
+        Preference applicationInfoLInkPref = findPreference(APP_INFO_LINK_PREFERENCE_KEY);
+        applicationInfoLInkPref.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
+            @Override
+            public boolean onPreferenceClick(Preference preference) {
+                Intent intent = new Intent();
+                intent.setAction(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                Uri uri = Uri.fromParts("package", getActivity().getPackageName(), null);
+                intent.setData(uri);
+
+                if(null != getActivity()) {
+                    getActivity().getApplicationContext().startActivity(intent);
                 }
 
                 return true;
             }
         });
 
-        mUserSettingsCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_user_settings));
-        mPushersSettingsCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_notifications_targets));
+        // permissions management
+        // on Android >= 23, use the system ones
+        if (Build.VERSION.SDK_INT >= 23) {
+            // hide the dedicated section
+            getPreferenceScreen().removePreference(getPreferenceManager().findPreference(getResources().getString(R.string.settings_app_permission)));
+        }
+
+        // background sync management
+        mBackgroundSyncCategory = (PreferenceCategory)getPreferenceManager().findPreference(getResources().getString(R.string.settings_background_sync));
+        mSyncRequestTimeoutPreference = (EditTextPreference)getPreferenceManager().findPreference(getResources().getString(R.string.settings_set_sync_timeout));
+        mSyncRequestDelayPreference = (EditTextPreference)getPreferenceManager().findPreference(getResources().getString(R.string.settings_set_sync_delay));
 
         refreshPushersList();
-        refreshPreferences();
         refreshEmailsList();
-        refreshDisplay();
+        refreshIgnoredUsersList();
+    }
+
+    @Override
+    public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
+        // if the user toggles the contacts book permission
+        if (TextUtils.equals(key, ContactsManager.CONTACTS_BOOK_ACCESS_KEY)) {
+            // reset the current snapshot
+            ContactsManager.clearSnapshot();
+        }
     }
 
     @Override
@@ -312,6 +406,8 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
             mSession.getDataHandler().removeListener(mEventsListener);
             Matrix.getInstance(getActivity()).removeNetworkEventListener(mNetworkListener);
         }
+
+        PreferenceManager.getDefaultSharedPreferences(getActivity()).unregisterOnSharedPreferenceChangeListener(this);
     }
 
     @Override
@@ -339,16 +435,19 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                 }
             });
 
-            Matrix.getInstance(getActivity()).getSharedGcmRegistrationManager().refreshPushersList(Matrix.getInstance(getActivity()).getSessions(), new SimpleApiCallback<Void>() {
+            Matrix.getInstance(getActivity()).getSharedGCMRegistrationManager().refreshPushersList(Matrix.getInstance(getActivity()).getSessions(), new SimpleApiCallback<Void>() {
                 @Override
                 public void onSuccess(Void info) {
                     refreshPushersList();
                 }
             });
 
+            PreferenceManager.getDefaultSharedPreferences(getActivity()).registerOnSharedPreferenceChangeListener(this);
+
             // refresh anything else
             refreshPreferences();
             refreshDisplay();
+            refreshBackgroundSyncPrefs();
         }
     }
 
@@ -386,7 +485,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
     /**
      * Hide the loading view and refresh the preferences.
-     * @param refresh
+     * @param refresh true to refresh the display
      */
     private void hideLoadingView(boolean refresh) {
         mLoadingView.setVisibility(View.GONE);
@@ -423,12 +522,20 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
         BingRuleSet rules = mSession.getDataHandler().pushRules();
 
+        GcmRegistrationManager gcmMgr = Matrix.getInstance(getActivity()).getSharedGCMRegistrationManager();
+
         for(String resourceText : mPushesRuleByResourceId.keySet()) {
             SwitchPreference switchPreference = (SwitchPreference) preferenceManager.findPreference(resourceText);
 
             if (null != switchPreference) {
-                switchPreference.setEnabled((null != rules) && isConnected);
-                switchPreference.setChecked(preferences.getBoolean(resourceText, false));
+                if (resourceText.equals(getResources().getString(R.string.settings_enable_this_device))) {
+                    switchPreference.setChecked(gcmMgr.areDeviceNotificationsAllowed());
+                } else if (resourceText.equals(getResources().getString(R.string.settings_turn_screen_on))) {
+                    switchPreference.setChecked(gcmMgr.isScreenTurnedOn());
+                } else {
+                    switchPreference.setEnabled((null != rules) && isConnected);
+                    switchPreference.setChecked(preferences.getBoolean(resourceText, false));
+                }
             }
         }
     }
@@ -456,8 +563,10 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                 // Setting Positive "Yes" Button
                 alertDialog.setPositiveButton(R.string.save, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface dialog, int which) {
-                        InputMethodManager imm = (InputMethodManager)getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
-                        imm.hideSoftInputFromWindow(view.getApplicationWindowToken(), 0);
+                        if (null != getActivity()) {
+                            InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+                            imm.hideSoftInputFromWindow(view.getApplicationWindowToken(), 0);
+                        }
 
                         String oldPwd = oldPasswordText.getText().toString().trim();
                         String newPwd = newPasswordText.getText().toString().trim();
@@ -507,8 +616,10 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                 // Setting Negative "NO" Button
                 alertDialog.setNegativeButton(R.string.cancel, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface dialog, int which) {
-                        InputMethodManager imm = (InputMethodManager)getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
-                        imm.hideSoftInputFromWindow(view.getApplicationWindowToken(), 0);
+                        if (null != getActivity()) {
+                            InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+                            imm.hideSoftInputFromWindow(view.getApplicationWindowToken(), 0);
+                        }
                     }
                 });
 
@@ -517,8 +628,10 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                 dialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
                     @Override
                     public void onCancel(DialogInterface dialog) {
-                        InputMethodManager imm = (InputMethodManager)getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
-                        imm.hideSoftInputFromWindow(view.getApplicationWindowToken(), 0);
+                        if (null != getActivity()) {
+                            InputMethodManager imm = (InputMethodManager) getActivity().getSystemService(Context.INPUT_METHOD_SERVICE);
+                            imm.hideSoftInputFromWindow(view.getApplicationWindowToken(), 0);
+                        }
                     }
                 });
 
@@ -552,6 +665,79 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
      * Update a push rule.
      */
     private void onPushRuleClick(final String fResourceText, final boolean newValue) {
+        final GcmRegistrationManager gcmMgr = Matrix.getInstance(getActivity()).getSharedGCMRegistrationManager();
+
+        Log.d(LOG_TAG, "onPushRuleClick " + fResourceText + " : set to " + newValue);
+
+        if (fResourceText.equals(getResources().getString(R.string.settings_turn_screen_on))) {
+            if (gcmMgr.isScreenTurnedOn() != newValue) {
+                gcmMgr.setScreenTurnedOn(newValue);
+            }
+            return;
+        }
+
+        if (fResourceText.equals(getResources().getString(R.string.settings_enable_this_device))) {
+            boolean isConnected = Matrix.getInstance(getActivity()).isConnected();
+            final boolean isAllowed = gcmMgr.areDeviceNotificationsAllowed();
+
+            // avoid useless update
+            if (isAllowed == newValue) {
+                return;
+            }
+
+            gcmMgr.setDeviceNotificationsAllowed(!isAllowed);
+
+            // when using GCM
+            // need to register on servers
+            if (isConnected && gcmMgr.useGCM() && (gcmMgr.isServerRegistred() || gcmMgr.isServerUnRegistred())) {
+                final GcmRegistrationManager.ThirdPartyRegistrationListener listener = new GcmRegistrationManager.ThirdPartyRegistrationListener() {
+
+                    private void onDone() {
+                        if (null != getActivity()) {
+                            getActivity().runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    hideLoadingView(true);
+                                    refreshPushersList();
+                                }
+                            });
+                        }
+                    }
+
+                    @Override
+                    public void onThirdPartyRegistered() {
+                        onDone();
+                    }
+
+                    @Override
+                    public void onThirdPartyRegistrationFailed() {
+                        gcmMgr.setDeviceNotificationsAllowed(isAllowed);
+                        onDone();
+                    }
+
+                    @Override
+                    public void onThirdPartyUnregistered() {
+                        onDone();
+                    }
+
+                    @Override
+                    public void onThirdPartyUnregistrationFailed() {
+                        gcmMgr.setDeviceNotificationsAllowed(isAllowed);
+                        onDone();
+                    }
+                };
+
+                displayLoadingView();
+                if (gcmMgr.isServerRegistred()) {
+                    gcmMgr.unregister(listener);
+                } else {
+                    gcmMgr.register(listener);
+                }
+            }
+
+            return;
+        }
+
         final String ruleId = mPushesRuleByResourceId.get(fResourceText);
         BingRule rule = mSession.getDataHandler().pushRules().findDefaultRule(ruleId);
 
@@ -659,7 +845,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
             @Override
             public void run() {
                 Intent intent = new Intent(getActivity(), VectorMediasPickerActivity.class);
-                intent.putExtra(VectorMediasPickerActivity.EXTRA_SINGLE_IMAGE_MODE, "");
+                intent.putExtra(VectorMediasPickerActivity.EXTRA_AVATAR_MODE, true);
                 startActivityForResult(intent, VectorUtils.TAKE_IMAGE);
             }
         });
@@ -675,24 +861,27 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
             if (null != thumbnailUri) {
                 displayLoadingView();
 
-                ResourceUtils.Resource resource = ResourceUtils.openResource(getActivity(), thumbnailUri);
+                ResourceUtils.Resource resource = ResourceUtils.openResource(getActivity(), thumbnailUri, null);
 
-                mSession.getContentManager().uploadContent(resource.contentStream, null, resource.mimeType, null, new ContentManager.UploadCallback() {
-                    @Override
-                    public void onUploadStart(String uploadId) {
-                    }
+                if (null != resource) {
+                    mSession.getMediasCache().uploadContent(resource.mContentStream, null, resource.mMimeType, null, new MXMediaUploadListener() {
 
-                    @Override
-                    public void onUploadProgress(String anUploadId, int percentageProgress) {
-                    }
+                        @Override
+                        public void onUploadError(String uploadId, int serverResponseCode, String serverErrorMessage) {
+                            getActivity().runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    hideLoadingView(false);
+                                }
+                            });
+                        }
 
-                    @Override
-                    public void onUploadComplete(final String anUploadId, final ContentResponse uploadResponse, final int serverReponseCode, final String serverErrorMessage) {
-                        getActivity().runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                if ((null != uploadResponse) && (null != uploadResponse.contentUri)) {
-                                    mSession.getMyUser().updateAvatarUrl(uploadResponse.contentUri, new ApiCallback<Void>() {
+                        @Override
+                        public void onUploadComplete(final String uploadId, final String contentUri) {
+                            getActivity().runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    mSession.getMyUser().updateAvatarUrl(contentUri, new ApiCallback<Void>() {
                                         @Override
                                         public void onSuccess(Void info) {
                                             onCommonDone(null);
@@ -714,13 +903,11 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                                             onCommonDone(e.getLocalizedMessage());
                                         }
                                     });
-                                } else {
-                                    hideLoadingView(false);
                                 }
-                            }
-                        });
-                    }
-                });
+                            });
+                        }
+                    });
+                }
             }
         }
 
@@ -759,6 +946,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                         try {
                             isEnabled = !TextUtils.equals(actions.get(0).getAsString(), BingRule.ACTION_DONT_NOTIFY);
                         } catch (Exception e) {
+                            Log.e(LOG_TAG, "## refreshPreferences failed " + e.getMessage());
                         }
                     }
                 }
@@ -771,6 +959,93 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
     }
 
     //==============================================================================================================
+    // ignored users list management
+    //==============================================================================================================
+
+    /**
+     * Refresh the ignored users list
+     */
+    private void refreshIgnoredUsersList() {
+        List<String> ignoredUsersList = mSession.getDataHandler().getIgnoredUserIds();
+
+        Collections.sort(ignoredUsersList, new Comparator<String>() {
+            @Override
+            public int compare(String u1, String u2) {
+                return u1.toLowerCase().compareTo(u2.toLowerCase());
+            }
+        });
+
+        PreferenceScreen preferenceScreen = getPreferenceScreen();
+
+        preferenceScreen.removePreference(mIgnoredUserSettingsCategory);
+        mIgnoredUserSettingsCategory.removeAll();
+
+        if (ignoredUsersList.size() > 0) {
+            preferenceScreen.addPreference(mIgnoredUserSettingsCategory);
+
+            for (final String userId : ignoredUsersList) {
+                VectorCustomActionEditTextPreference preference = new VectorCustomActionEditTextPreference(getActivity());
+
+                preference.setTitle(userId);
+                preference.setKey(IGNORED_USER_KEY_BASE + userId);
+
+                preference.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
+                    @Override
+                    public boolean onPreferenceClick(Preference preference) {
+                        new AlertDialog.Builder(VectorApp.getCurrentActivity())
+                                .setMessage(getActivity().getString(R.string.settings_unignore_user, userId))
+                                .setPositiveButton(R.string.yes, new DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        dialog.dismiss();
+
+                                        displayLoadingView();
+
+                                        ArrayList<String> idsList = new ArrayList<>();
+                                        idsList.add(userId);
+
+                                        mSession.unIgnoreUsers(idsList, new ApiCallback<Void>() {
+                                            @Override
+                                            public void onSuccess(Void info) {
+                                                onCommonDone(null);
+                                            }
+
+                                            @Override
+                                            public void onNetworkError(Exception e) {
+                                                onCommonDone(e.getLocalizedMessage());
+                                            }
+
+                                            @Override
+                                            public void onMatrixError(MatrixError e) {
+                                                onCommonDone(e.getLocalizedMessage());
+                                            }
+
+                                            @Override
+                                            public void onUnexpectedError(Exception e) {
+                                                onCommonDone(e.getLocalizedMessage());
+                                            }
+                                        });
+                                    }
+                                })
+                                .setNegativeButton(R.string.no, new DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        dialog.dismiss();
+                                    }
+                                })
+                                .create()
+                                .show();
+
+                        return false;
+                    }
+                });
+
+                mIgnoredUserSettingsCategory.addPreference(preference);
+            }
+        }
+    }
+
+    //==============================================================================================================
     // pushers list management
     //==============================================================================================================
 
@@ -778,7 +1053,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
      * Refresh the pushers list
      */
     private void refreshPushersList() {
-        GcmRegistrationManager registrationManager = Matrix.getInstance(getActivity()).getSharedGcmRegistrationManager();
+        GcmRegistrationManager registrationManager = Matrix.getInstance(getActivity()).getSharedGCMRegistrationManager();
         List<Pusher> pushersList = new ArrayList<>(registrationManager.mPushersList);
 
         // check first if there is an update
@@ -789,15 +1064,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
         if (isNewList) {
             // remove the displayed one
-            for (int index = 0; ; index++) {
-                Preference preference = mPushersSettingsCategory.findPreference(PUSHER_PREREFENCE_KEY_BASE + index);
-
-                if (null != preference) {
-                    mPushersSettingsCategory.removePreference(preference);
-                } else {
-                    break;
-                }
-            }
+            mPushersSettingsCategory.removeAll();
 
             // add new emails list
             mDisplayedPushers = pushersList;
@@ -807,11 +1074,16 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
             for (Pusher pusher : mDisplayedPushers) {
                 VectorCustomActionEditTextPreference preference = new VectorCustomActionEditTextPreference(getActivity());
 
-                preference.setTitle(pusher.deviceDisplayName);
-                preference.setSummary(pusher.appDisplayName);
-                preference.setKey(PUSHER_PREREFENCE_KEY_BASE + index);
-                index++;
-                mPushersSettingsCategory.addPreference(preference);
+                // fix https://github.com/vector-im/vector-android/issues/192
+                // It appears that the server sends some invalid pushers where the device and the app are
+                // invalid. In all these cases the language is set to null.
+                if(null != pusher.lang) {
+                    preference.setTitle(pusher.deviceDisplayName);
+                    preference.setSummary(pusher.appDisplayName);
+                    preference.setKey(PUSHER_PREFERENCE_KEY_BASE + index);
+                    index++;
+                    mPushersSettingsCategory.addPreference(preference);
+                }
             }
         }
     }
@@ -835,7 +1107,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
         if (isNewList) {
             // remove the displayed one
             for (int index = 0; ; index++) {
-                Preference preference = mUserSettingsCategory.findPreference(EMAIL_PREREFENCE_KEY_BASE + index);
+                Preference preference = mUserSettingsCategory.findPreference(EMAIL_PREFERENCE_KEY_BASE + index);
 
                 if (null != preference) {
                     mUserSettingsCategory.removePreference(preference);
@@ -860,7 +1132,18 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
                 preference.setTitle(getResources().getString(R.string.settings_email_address));
                 preference.setSummary(email);
-                preference.setKey(EMAIL_PREREFENCE_KEY_BASE + index);
+                preference.setKey(EMAIL_PREFERENCE_KEY_BASE + index);
+
+                final String fEmailAddress = email;
+
+                preference.setOnPreferenceLongClickListener(new VectorCustomActionEditTextPreference.OnPreferenceLongClickListener() {
+                    @Override
+                    public boolean onPreferenceLongClick(Preference preference) {
+                        VectorUtils.copyToClipboard(getActivity(), fEmailAddress);
+                        return true;
+                    }
+                });
+
                 index++;
                 mUserSettingsCategory.addPreference(preference);
             }
@@ -880,7 +1163,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
                     new Preference.OnPreferenceChangeListener() {
                         @Override
                         public boolean onPreferenceChange(Preference preference, Object newValue) {
-                            final String email = (String) newValue;
+                            final String email = (null == newValue) ? null  : ((String) newValue).trim();
 
                             getActivity().runOnUiThread(new Runnable() {
                                 @Override
@@ -918,7 +1201,7 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
     /**
      * Attempt to add a new email to the account
-     * @param email
+     * @param email the email to add.
      */
     private void addEmail(String email) {
         // check first if the email syntax is valid
@@ -1034,5 +1317,112 @@ public class VectorSettingsPreferencesFragment extends PreferenceFragment {
 
         AlertDialog alert = builder.create();
         alert.show();
+    }
+
+    //==============================================================================================================
+    // background sync management
+    //==============================================================================================================
+
+    /**
+     * Convert a delay in seconds to string
+     * @param seconds the delay in seconds
+     * @return the text
+     */
+    private String secondsToText(int seconds) {
+        if (seconds > 1) {
+            return seconds + " " + getActivity().getString(R.string.settings_seconds);
+        } else {
+            return seconds + " " + getActivity().getString(R.string.settings_second);
+        }
+    }
+
+    /**
+     * Refresh the background sync preference
+     */
+    private void refreshBackgroundSyncPrefs() {
+        // sanity check
+        if (null == getActivity()) {
+            return;
+        }
+
+        final GcmRegistrationManager gcmmgr = Matrix.getInstance(getActivity()).getSharedGCMRegistrationManager();
+
+        final int timeout = gcmmgr.getBackgroundSyncTimeOut() / 1000;
+        final int delay = gcmmgr.getBackgroundSyncDelay() / 1000;
+
+        // update the settings
+        final SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(getActivity());
+        SharedPreferences.Editor editor = preferences.edit();
+        editor.putString(this.getResources().getString(R.string.settings_set_sync_timeout), timeout + "");
+        editor.putString(this.getResources().getString(R.string.settings_set_sync_delay), delay + "");
+        editor.commit();
+
+        if (null != mSyncRequestTimeoutPreference) {
+            mSyncRequestTimeoutPreference.setSummary(secondsToText(timeout));
+
+            mSyncRequestTimeoutPreference.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    int newTimeOut = timeout;
+
+                    try {
+                        newTimeOut = Integer.parseInt((String) newValue);
+                    } catch(Exception e) {
+                        Log.e(LOG_TAG, "## refreshBackgroundSyncPrefs : parseInt failed " + e.getMessage());
+                    }
+
+                    if (newTimeOut != timeout) {
+                        gcmmgr.setBackgroundSyncTimeOut(newTimeOut * 1000);
+
+                        getActivity().runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                refreshBackgroundSyncPrefs();
+                            }
+                        });
+                    }
+
+                    return false;
+                }
+            });
+
+        }
+
+        if (null != mSyncRequestDelayPreference) {
+            mSyncRequestDelayPreference.setSummary(secondsToText(delay));
+
+            mSyncRequestDelayPreference.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+
+                    int newDelay = delay;
+
+                    try {
+                        newDelay = Integer.parseInt((String) newValue);
+                    } catch(Exception e) {
+                        Log.e(LOG_TAG, "## refreshBackgroundSyncPrefs : parseInt failed " + e.getMessage());
+                    }
+
+                    if (newDelay != delay) {
+                        gcmmgr.setBackgroundSyncDelay(newDelay * 1000);
+
+                        getActivity().runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                refreshBackgroundSyncPrefs();
+                            }
+                        });
+                    }
+
+                    return false;
+                }
+            });
+        }
+
+        // theses both settings are dedicated when a client does not support GCM
+        if (gcmmgr.hasRegistrationToken()) {
+            mBackgroundSyncCategory.removePreference(mSyncRequestTimeoutPreference);
+            mBackgroundSyncCategory.removePreference(mSyncRequestDelayPreference);
+        }
     }
 }

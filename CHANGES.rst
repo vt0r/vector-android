@@ -1,3 +1,168 @@
+Changes in Vector 0.4.1 (2016-09-13)
+===================================================
+
+Improvements:
+ * #288 : Search in the Add member to a room page : contact with matrix emails should be merged
+ * #438 : Add contacts access any android
+ * #444 : Strip ' (IRC)' when autocompleting
+ * Room creation : restore the room creation with members selection before really creating the room.
+ * Login page : replace the expand button by a checkbox.
+ * Improve the call avatar when receiving a call
+ 
+Features:
+ * #423 : Intercept matrix.to URLs within the app
+ 
+Bugfixes:
+ * Fix crash in caller side when the callee did not answer
+ * #251 : refuse to create a new room if there is already one in progress (like the IOS client)
+ * #378 : Context menu should have option to quote a message
+ * #384 : Tap on avatar in Member Info page to zoom to view avatar full page 
+ * #386 : Sender picture missing in notification
+ * #389 / #390 : [VoIP] start call icon must be always displayed
+ * #391 : Fix login/password kept after logout
+ * #392 : Add "Audio focus" implementation
+ * #395 : VoIP call button should disappear from composer area when you start typing
+ * #396 : Displayed name should be consistent for all events.
+ * #397 : Generated avatar should be consistent for all events
+ * #404 : The message displayed in a room when a 3pid invited user has registered is not clear 
+ * #406 : Chat screen: New message(s) notification
+ * #407 : Chat screen: The read receipts from the conference user should be ignored 
+ * #413 : The typing area uses the fullscreen when the user is not allowed to post
+ * #415 : Room Settings: some addresses are missing
+ * #417 : Room settings - Addresses: Display the context menu on tap instead of long press 
+ * #418 : Vector shouldn't expose Directory when trying to scroll past the bottom of the room list
+ * #431 : Call screen : speaker and mute icons should be available asap the activity is launched
+ * #435 : trim leading/trailing space when setting display names 
+ * #439 : add markdown support for emotes
+ * #445 : Unable to join federated rooms with Android app
+ * #451 : sharing a website from chrome send an invalid jpg image instead of sending the url
+ * #454 : Let users join confs as voice or video 
+ * #463 : Searching for a display name including a space doesn't find it 
+ * #465 : Chat screen: disable auto scroll to bottom on keyboard presentation
+ * #473 : Huge text messages are not rendered on some android devices 
+ 
+ 
+Changes in Vector 0.4.0 (2016-08-12)
+===================================================
+
+Improvements:
+ * Media upload/download UI
+
+Features:
+ * Add conference call
+ * #311 : Chat screen: Add "view source" option on the selected event 
+ * #314 : Support rageshake reporting via Vector (as opposed to email) 
+ * #316 : Confirmation prompt before opping someone to same power level as per web
+ * #347 : Display the banned users
+ * #350 : Room name and memebers searches are dynamically refreshed  
+ 
+Bugfixes:
+ * #289 : Improve the camera selfie mode
+ * #290 : Redacting membership events should immediately reset the displayname & avatar of room members
+ * #299 : We should show a list of ignored users in user settings somewhere.
+ * #302 : Impossible to scroll in User list.
+ * #320 : Sanitise the logs to remove private data.
+ * #323 : The room and the recents activites header are sometimes blank
+ * #326 : Settings page : the switch values are sometimes updated while scrolling in the page
+ * #330 : some medias are not downloadable
+ * #334 : Quick replay on invitations to room
+ * #343 : Incoming calls should put the application in foreground
+ * #352 : some rooms are not displayed in the recents when the 10 last messages are redacted ones after performing an initial sync
+ * #353 : Forwarded item is sent several times when the device is rotated
+ * #358 : Update the event not found message when clicking on permalink
+ * #359 : Redacting a video during sending goes wrong
+ * #360 : If you try 'share to vector' from another app and share to a room, it should let you edit before sending 
+ * #362 : Add option to disable the permanent notification when background sync is on.
+ * #364 : Profile changes shouldn't reorder the room list 
+ * #367 : Settings entries are not fully displayed.
+ * Fdroid version : the synchronization was not resumed asap when a delay timer was set.
+ * Some permission requirements were not properly requested.
+ * Several crashes reported by Google Analytics.
+
+Changes in Vector 0.3.4 (2016-07-18)
+===================================================
+
+Improvements:
+ * #291 : Room settings: the first created alias should be defined as the main address by default.
+ * Imporve the low memory management.
+
+Bugfixes:
+ * #293 : The markdown rendering is mangled for backtick blocks.
+ * #294 : Messages: switch decline and preview buttons on invites enhancement.
+ * #297 : Redact avatar / name update event should remove them from the room history.
+ * #307 : Red FAB for room creation should fade in/out.
+ * #309 : Send button is too small.
+ * #310 : Room header view seems to ignore the first tap.
+ * #318 : Some member avatars are wrong.
+ * Fix an infinite loop when third party registration fails.
+ * Always display the permalink action. (even if the hs is not matrix.org).
+ * Fix some flickering settings buttons.
+ * Fix several GA crashes.
+ 
+Changes in Vector 0.3.3 (2016-07-11)
+===================================================
+
+Improvements:
+ * #248 : Update room members search sort.
+ * #249 : Fix some lint errors.
+ * The android permissions are only requested in the right fragment/activity.
+ * The image compression dialog is only requested once when an images batch is sent.
+ * Update gradle to 1.5.0
+
+Features:
+ * Add the room aliases management in the room settings page. 
+ 
+Bugfixes:
+ * #177 / 245 : Click on a room invitation notification should open the room preview.
+ * #237 : Sending several images in one time should offer compression for each 
+ * #239 : Display notifications when GCM is enabled and background synd is disabled.
+ * #253 : Add copy in any room message
+ * #203 / 257 : Login page buttons disabled when no network.
+ * #261 : The app should not display <img> from HTML formatted_body.
+ * #262 : Improve device notification settings 
+ * #263 : redactions shouldn't hide auth events (eg bans) from the timeline. they should only hide the human readable bits of content.
+ * #268 : Add 'leave' button to room settings.
+ * #271 : Accepting an invite does not get full scrollback.
+ * #272 : MD swallows leading #'s even if there are less than 3.
+ * #278 : Add exclamation badge in invitation cell
+ * Display leave room when displaying the account member details activity when no room is defined.
+ * In some cases, the filename was not properly retrieved.
+ * fix several GA crashes.
+ 
+Changes in Vector 0.3.2 (2016-06-21)
+===================================================
+
+Improvements:
+ * When GCM is not available, 
+ * Display the call events in the room history.
+ * Display a thick green line in permalink display mode.
+ * RoomActivity : tap on the room avatar open the medias picker and update the room avatar.
+
+Features:
+ * Add android M support
+ * Add a selfie mode in the medias picker.
+ * The client uses two flavors (google play and F-droid).
+ * The background sync can be disabled.
+ * The sync timeout is configurable when GCM is not available
+ * A sleep between sync can be defined when GCM is not available
+ 
+Bugfixes:
+ * Fix issue #206 : There is no space between some avatars (unexpected avatar)
+ * Fix issue #197 : Room members : the Pen menu icon should be hidden if the user is alone in the room or is not administrator 
+ * Fix issue #212 : Sharing from some apps to Vector not working
+ * Fix issue #196 : Room members in edition mode : the Add button should be hidden
+ * Fix issue #214 : the Pen menu icon should be hidden if the user is alone in the room or is not administrator
+ * Fix issue #215 : Improve medias management
+ * Fix issue #216 : Fix add button room details
+ * Fix issue #192 : "Notification targets" (global settings) entry should not be displayed if it is empty
+ * Fix issue #209 : The avatar of invited users are not displayed in the details member activity if he did not joined any other room
+ * Fix issue #186 : Start chat with a member should use the latest room instead of the first found one
+ * Fix issue #167 : Heavy battery drain.
+ * Fix issue #172 : Messages: Add Directory section at the top on scroll down.
+ * Fix issue #231 : /invite support, and any other missing slash commands.
+ * The device used to ring forever when a call was received when the device was locked and answered from another client.
+ * Fix several GA issues
+ 
 Changes in Vector 0.3.1 (2016-06-07)
 ===================================================
 

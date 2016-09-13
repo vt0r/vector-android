@@ -15,14 +15,15 @@
  */
 package im.vector.activity;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
-import android.os.Build;
+import android.media.ExifInterface;
 import android.os.Bundle;
+import android.support.annotation.NonNull;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.View;
 import android.widget.ImageView;
 import android.widget.ListView;
@@ -65,6 +66,8 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
 
     public static final String RESULT_MENTION_ID = "RESULT_MENTION_ID";
 
+    private static final String AVATAR_FULLSCREEN_MODE = "AVATAR_FULLSCREEN_MODE";
+
     // list view items associated actions
     public static final int ITEM_ACTION_INVITE = 0;
     public static final int ITEM_ACTION_LEAVE = 1;
@@ -82,17 +85,14 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
     public static final int ITEM_ACTION_START_VIDEO_CALL = 13;
     public static final int ITEM_ACTION_MENTION = 14;
 
-
-    private static int VECTOR_ROOM_MODERATOR_LEVEL = 50;
-    private static int VECTOR_ROOM_ADMIN_LEVEL = 100;
+    private static final int VECTOR_ROOM_MODERATOR_LEVEL = 50;
+    private static final int VECTOR_ROOM_ADMIN_LEVEL = 100;
 
     // internal info
-    private IMXStore mStore;
     private Room mRoom;
     private String mRoomId;
     private String mMemberId;       // member whose details area displayed (provided in EXTRAS)
     private RoomMember mRoomMember; // room member corresponding to mMemberId
-    private boolean mIsMemberJoined;
     private MXSession mSession;
     //private ArrayList<MemberDetailsAdapter.AdapterMemberActionItems> mActionItemsArrayList;
     private MemberDetailsAdapter mListViewAdapter;
@@ -104,8 +104,11 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
     private ImageView mMemberAvatarBadgeImageView;
     private TextView mMemberNameTextView;
     private TextView mPresenceTextView;
-    private ListView mActionItemsListView;
     private View mProgressBarView;
+
+    // full screen avatar
+    private View mFullMemberAvatarLayout;
+    private ImageView mFullMemberAvatarImageView;
 
     // MX event listener
     private final MXEventListener mLiveEventsListener = new MXEventListener() {
@@ -156,6 +159,9 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
                 VectorMemberDetailsActivity.this.runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        // display an avatar it it was not used
+                        updateMemberAvatarUi();
+                        // refresh the presence
                         updatePresenceInfoUi();
                     }
                 });
@@ -164,7 +170,7 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
     };
 
     // Room action listeners. Every time an action is detected the UI must be updated.
-    private final ApiCallback mRoomActionsListener = new SimpleApiCallback<Void>(this) {
+    private final ApiCallback<Void> mRoomActionsListener = new SimpleApiCallback<Void>(this) {
         @Override
         public void onMatrixError(MatrixError e) {
             if (MatrixError.FORBIDDEN.equals(e.errcode)) {
@@ -193,34 +199,88 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
 
     /**
      * Start a call in a dedicated room
-     * @param room the room
      * @param isVideo true if the call is a video call
      */
-    private void startCall(Room room, boolean isVideo) {
+    private void startCall(final boolean isVideo) {
         if (!mSession.isAlive()) {
             Log.e(LOG_TAG, "startCall : the session is not anymore valid");
             return;
         }
 
         // create the call object
-        IMXCall call = mSession.mCallsManager.createCallInRoom(mRoom.getRoomId());
+        mSession.mCallsManager.createCallInRoom(mRoom.getRoomId(), new ApiCallback<IMXCall>() {
+            @Override
+            public void onSuccess(final IMXCall call) {
+                VectorMemberDetailsActivity.this.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        call.setIsVideo(isVideo);
+                        call.setIsIncoming(false);
 
-        if (null != call) {
-            call.setIsVideo(isVideo);
-            call.setRoom(room);
-            call.setIsIncoming(false);
+                        final Intent intent = new Intent(VectorMemberDetailsActivity.this, VectorCallViewActivity.class);
 
-            final Intent intent = new Intent(VectorMemberDetailsActivity.this, CallViewActivity.class);
+                        intent.putExtra(VectorCallViewActivity.EXTRA_MATRIX_ID, mSession.getCredentials().userId);
+                        intent.putExtra(VectorCallViewActivity.EXTRA_CALL_ID, call.getCallId());
 
-            intent.putExtra(CallViewActivity.EXTRA_MATRIX_ID, mSession.getCredentials().userId);
-            intent.putExtra(CallViewActivity.EXTRA_CALL_ID, call.getCallId());
+                        VectorMemberDetailsActivity.this.runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                VectorMemberDetailsActivity.this.startActivity(intent);
+                            }
+                        });
+                    }
+                });
+            }
 
-            VectorMemberDetailsActivity.this.runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    VectorMemberDetailsActivity.this.startActivity(intent);
-                }
-            });
+            @Override
+            public void onNetworkError(Exception e) {
+
+            }
+
+            @Override
+            public void onMatrixError(MatrixError e) {
+
+            }
+
+            @Override
+            public void onUnexpectedError(Exception e) {
+
+            }
+        });
+    }
+
+    /**
+     * Check the permissions to establish an audio/video call.
+     * If permissions are already granted, the call is established, otherwise
+     * the permissions are checked against the system. Final result is provided in
+     * {@link #onRequestPermissionsResult(int, String[], int[])}.
+     *
+     * @param aIsVideoCall true if video call, false if audio call
+     */
+    private void startCheckCallPermissions(boolean aIsVideoCall) {
+        int requestCode = CommonActivityUtils.REQUEST_CODE_PERMISSION_AUDIO_IP_CALL;
+
+        if(aIsVideoCall){
+            requestCode = CommonActivityUtils.REQUEST_CODE_PERMISSION_VIDEO_IP_CALL;
+        }
+
+        if(CommonActivityUtils.checkPermissions(requestCode, this)){
+            startCall(aIsVideoCall);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int aRequestCode, @NonNull String[] aPermissions, @NonNull  int[] aGrantResults) {
+        if (0 == aPermissions.length) {
+            Log.e(LOG_TAG, "## onRequestPermissionsResult(): cancelled " + aRequestCode);
+        } else if (aRequestCode == CommonActivityUtils.REQUEST_CODE_PERMISSION_AUDIO_IP_CALL) {
+            if (CommonActivityUtils.onPermissionResultAudioIpCall(this, aPermissions, aGrantResults)) {
+                startCall(false);
+            }
+        } else if (aRequestCode == CommonActivityUtils.REQUEST_CODE_PERMISSION_VIDEO_IP_CALL) {
+            if (CommonActivityUtils.onPermissionResultVideoIpCall(this, aPermissions, aGrantResults)) {
+                startCall(true);
+            }
         }
     }
 
@@ -236,7 +296,7 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
             return;
         }
 
-        ArrayList<String> idsList = new ArrayList<String>();
+        ArrayList<String> idsList = new ArrayList<>();
 
         switch (aActionType) {
             case ITEM_ACTION_START_CHAT:
@@ -255,7 +315,7 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
             case ITEM_ACTION_START_VIDEO_CALL:
             case ITEM_ACTION_START_VOICE_CALL:
                 Log.d(LOG_TAG,"## performItemAction(): Start call");
-                startCall(mCallableRoom, ITEM_ACTION_START_VIDEO_CALL == aActionType);
+                startCheckCallPermissions(ITEM_ACTION_START_VIDEO_CALL == aActionType);
                 break;
 
             case ITEM_ACTION_INVITE:
@@ -276,14 +336,14 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
 
             case ITEM_ACTION_SET_ADMIN:
                 if (null != mRoom) {
-                    mRoom.updateUserPowerLevels(mMemberId, VECTOR_ROOM_ADMIN_LEVEL, mRoomActionsListener);
+                    updateUserPowerLevels(mMemberId, VECTOR_ROOM_ADMIN_LEVEL, mRoomActionsListener);
                     Log.d(LOG_TAG, "## performItemAction(): Make Admin");
                 }
                 break;
 
             case ITEM_ACTION_SET_MODERATOR:
                 if (null != mRoom) {
-                    mRoom.updateUserPowerLevels(mMemberId, VECTOR_ROOM_MODERATOR_LEVEL, mRoomActionsListener);
+                    updateUserPowerLevels(mMemberId, VECTOR_ROOM_MODERATOR_LEVEL, mRoomActionsListener);
                     Log.d(LOG_TAG, "## performItemAction(): Make moderator");
                 }
                 break;
@@ -294,10 +354,10 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
                     PowerLevels powerLevels = mRoom.getLiveState().getPowerLevels();
 
                     if (null != powerLevels) {
-                        defaultPowerLevel = powerLevels.usersDefault;
+                        defaultPowerLevel = powerLevels.users_default;
                     }
 
-                    mRoom.updateUserPowerLevels(mMemberId, defaultPowerLevel, mRoomActionsListener);
+                    updateUserPowerLevels(mMemberId, defaultPowerLevel, mRoomActionsListener);
                     Log.d(LOG_TAG, "## performItemAction(): default power level");
                 }
                 break;
@@ -307,6 +367,14 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
                     enableProgressBarView(CommonActivityUtils.UTILS_DISPLAY_PROGRESS_BAR);
                     mRoom.ban(mRoomMember.getUserId(), null, mRoomActionsListener);
                     Log.d(LOG_TAG, "## performItemAction(): Block (Ban)");
+                }
+                break;
+
+            case ITEM_ACTION_UNBAN:
+                if (null != mRoom) {
+                    enableProgressBarView(CommonActivityUtils.UTILS_DISPLAY_PROGRESS_BAR);
+                    mRoom.unban(mRoomMember.getUserId(), mRoomActionsListener);
+                    Log.d(LOG_TAG, "## performItemAction(): Block (unban)");
                 }
                 break;
 
@@ -370,8 +438,47 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
     }
 
     /**
+     * Update the power level of the user userId.
+     * A confirmation dialog is displayed the new user level is the same as the self one.
+     * @param userId the user id
+     * @param newPowerLevel the new power level
+     * @param callback the callback with the created event
+     */
+    private void updateUserPowerLevels(final String userId, final int newPowerLevel, final ApiCallback<Void> callback) {
+        PowerLevels powerLevels = mRoom.getLiveState().getPowerLevels();
+        int currentSelfPowerLevel = 0;
+
+        if (null != powerLevels) {
+            currentSelfPowerLevel = powerLevels.getUserPowerLevel(mSession.getMyUserId());
+        }
+
+        if (currentSelfPowerLevel == newPowerLevel) {
+            // ask to the user to confirmation thu upgrade.
+            new AlertDialog.Builder(VectorApp.getCurrentActivity())
+                    .setMessage(R.string.room_participants_power_level_prompt)
+                    .setPositiveButton(R.string.yes, new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            dialog.dismiss();
+                            mRoom.updateUserPowerLevels(userId, newPowerLevel, callback);
+                        }
+                    })
+                    .setNegativeButton(R.string.no, new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            dialog.dismiss();
+                        }
+                    })
+                    .create()
+                    .show();
+        } else {
+            mRoom.updateUserPowerLevels(userId, newPowerLevel, callback);
+        }
+    }
+
+    /**
      * Search the first callable room with this member
-     * @return
+     * @return a valid Room instance, null if no room found
      */
     private Room searchCallableRoom() {
         if (!mSession.isAlive()) {
@@ -402,7 +509,7 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
      * @return the list of supported actions (ITEM_ACTION_XX)
      */
     private ArrayList<Integer> supportedActionsList() {
-        ArrayList<Integer> supportedActions = new ArrayList<Integer>();
+        ArrayList<Integer> supportedActions = new ArrayList<>();
 
         if (!mSession.isAlive()) {
             Log.e(LOG_TAG, "supportedActionsList : the session is not anymore valid");
@@ -438,7 +545,9 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
 
         // Check user's power level before allowing an action (kick, ban, ...)
         if (TextUtils.equals(mMemberId, selfUserId)) {
-            supportedActions.add(ITEM_ACTION_LEAVE);
+            if (null != mRoom) {
+                supportedActions.add(ITEM_ACTION_LEAVE);
+            }
 
             if ((null != powerLevels) && (selfPowerLevel >= powerLevels.minimumPowerLevelForSendingEventAsStateEvent(Event.EVENT_TYPE_STATE_ROOM_POWER_LEVELS))) {
                 // Check whether the user is admin (in this case he may reduce his power level to become moderator).
@@ -453,15 +562,12 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
             }
         } else if (null != mRoomMember) {
             // offer to start a new chat only if the room is not a 1:1 room with this user
-            // it does not make sense : it would open the same room
-            Room room = CommonActivityUtils.findOneToOneRoom(mSession, mRoomMember.getUserId());
-
-            if ((null == room) || !TextUtils.equals(room.getRoomId(), mRoomId)) {
+            if (!CommonActivityUtils.isOneToOneRoomJoinedByUserId(mRoom, mRoomMember.getUserId())) {
                 supportedActions.add(ITEM_ACTION_START_CHAT);
             }
 
             // 1:1 call
-            if ((null != searchCallableRoom()) && mSession.isVoipCallSupported() && (null == CallViewActivity.getActiveCall())) {
+            if ((null != searchCallableRoom()) && mSession.isVoipCallSupported() && (null == VectorCallViewActivity.getActiveCall())) {
                 // Offer voip call options
                 supportedActions.add(ITEM_ACTION_START_VOICE_CALL);
                 supportedActions.add(ITEM_ACTION_START_VIDEO_CALL);
@@ -634,6 +740,13 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
                 mListViewAdapter.add(new AdapterMemberActionItems(imageResource, actionText, ITEM_ACTION_BAN));
             }
 
+            // build the "unblock" item (unblock)
+            if (supportedActionsList.indexOf(ITEM_ACTION_UNBAN) >= 0) {
+                imageResource = R.drawable.ic_block_black;
+                actionText = getResources().getString(R.string.room_participants_action_unban);
+                mListViewAdapter.add(new AdapterMemberActionItems(imageResource, actionText, ITEM_ACTION_UNBAN));
+            }
+
             // build the "ignore" item
             if (supportedActionsList.indexOf(ITEM_ACTION_IGNORE) >= 0) {
                 imageResource = R.drawable.ic_person_outline_black;
@@ -667,6 +780,11 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
             return;
         }
 
+        if (CommonActivityUtils.isGoingToSplash(this)) {
+            Log.d(LOG_TAG, "onCreate : Going to splash screen");
+            return;
+        }
+
         // retrieve the parameters contained extras and setup other
         // internal state values such as the; session, room..
         if(!initContextStateValues()){
@@ -687,21 +805,31 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
             // to be able to display a large header
             android.support.v7.widget.Toolbar toolbar = (android.support.v7.widget.Toolbar) findViewById(R.id.member_details_toolbar);
             this.setSupportActionBar(toolbar);
-            getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+
+            if (null != getSupportActionBar()) {
+                getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            }
 
             mMemberAvatarImageView = (ImageView) findViewById(R.id.avatar_img);
             mMemberAvatarBadgeImageView = (ImageView) findViewById(R.id.member_avatar_badge);
 
+            mFullMemberAvatarImageView = (ImageView) findViewById(R.id.member_details_fullscreen_avatar_image_view);
+            mFullMemberAvatarLayout = findViewById(R.id.member_details_fullscreen_avatar_layout);
+
             mMemberNameTextView = (TextView) findViewById(R.id.member_details_name);
             mPresenceTextView = (TextView) findViewById(R.id.member_details_presence);
-            mActionItemsListView = (ListView) findViewById(R.id.member_details_actions_list_view);
             mProgressBarView = findViewById(R.id.member_details_list_view_progress_bar);
 
             // setup the list view
             mListViewAdapter = new MemberDetailsAdapter(this, R.layout.vector_adapter_member_details_items);
             mListViewAdapter.setActionListener(this);
             updateAdapterListViewItems();
-            mActionItemsListView.setAdapter(mListViewAdapter);
+
+            ListView actionItemsListView = (ListView) findViewById(R.id.member_details_actions_list_view);
+
+            if (null != actionItemsListView) {
+                actionItemsListView.setAdapter(mListViewAdapter);
+            }
 
             // when clicking on the username
             // switch member name <-> member id
@@ -724,25 +852,108 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
             mMemberNameTextView.setOnLongClickListener(new View.OnLongClickListener() {
                 @Override
                 public boolean onLongClick(View v) {
-                    ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                    ClipData clip = ClipData.newPlainText("", mMemberNameTextView.getText());
-                    clipboard.setPrimaryClip(clip);
-
-                    Context context = VectorMemberDetailsActivity.this;
-                    Toast.makeText(context, context.getResources().getString(R.string.copied_to_clipboard), Toast.LENGTH_SHORT).show();
+                    VectorUtils.copyToClipboard(VectorMemberDetailsActivity.this, mMemberNameTextView.getText());
                     return true;
+                }
+            });
+
+            mMemberAvatarImageView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    displayFullScreenAvatar();
+                }
+            });
+
+            mFullMemberAvatarImageView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    hideFullScreenAvatar();
+                }
+            });
+
+            mFullMemberAvatarLayout.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    hideFullScreenAvatar();
                 }
             });
 
             // update the UI
             updateUi();
+
+            if ((null != savedInstanceState) && savedInstanceState.getBoolean(AVATAR_FULLSCREEN_MODE, false)) {
+                displayFullScreenAvatar();
+            }
+        }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if ((KeyEvent.KEYCODE_BACK == keyCode) && (View.VISIBLE == mFullMemberAvatarLayout.getVisibility())) {
+            hideFullScreenAvatar();
+            return true;
+        }
+
+        return super.onKeyDown(keyCode, event);
+    }
+
+
+    @Override
+    public void onSaveInstanceState(Bundle savedInstanceState) {
+        // Always call the superclass so it can save the view hierarchy state
+        super.onSaveInstanceState(savedInstanceState);
+        savedInstanceState.putBoolean(AVATAR_FULLSCREEN_MODE, View.VISIBLE == mFullMemberAvatarLayout.getVisibility());
+    }
+
+    @Override
+    protected void onRestoreInstanceState(Bundle savedInstanceState) {
+        super.onRestoreInstanceState(savedInstanceState);
+
+        if (savedInstanceState.getBoolean(AVATAR_FULLSCREEN_MODE, false)) {
+            displayFullScreenAvatar();
+        }
+    }
+
+    /**
+     * Hide the fullscreen avatar.
+     */
+    private void hideFullScreenAvatar() {
+        mFullMemberAvatarLayout.setVisibility(View.GONE);
+    }
+
+    /**
+     * Display the user/member avatar in fullscreen.
+     */
+    private void displayFullScreenAvatar() {
+        String avatarUrl = null;
+        String userId = mMemberId;
+
+        if (null != mRoomMember) {
+            avatarUrl =  mRoomMember.avatarUrl;
+
+            if (TextUtils.isEmpty(avatarUrl)) {
+                userId = mRoomMember.getUserId();
+            }
+        }
+
+        if (TextUtils.isEmpty(avatarUrl) && !TextUtils.isEmpty(userId)) {
+            User user = mSession.getDataHandler().getStore().getUser(mMemberId);
+
+            if (null != user) {
+                avatarUrl = user.getAvatarUrl();
+            }
+        }
+
+        if (!TextUtils.isEmpty(avatarUrl)) {
+            mFullMemberAvatarLayout.setVisibility(View.VISIBLE);
+            mSession.getMediasCache().loadBitmap(mSession.getHomeserverConfig(), mFullMemberAvatarImageView, avatarUrl, 0, ExifInterface.ORIENTATION_UNDEFINED, null);
         }
     }
 
     /**
      * Retrieve all the state values required to run the activity.
-     * If values are not provided in the intent extars or are some are
-     * null, then the activiy can not continue to run and must be finished
+     * If values are not provided in the intent or are some are
+     * null, then the activity can not continue to run and must be finished
      * @return true if init succeed, false otherwise
      */
     private boolean initContextStateValues(){
@@ -752,23 +963,24 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
         if (null != intent) {
             if (null == (mMemberId = intent.getStringExtra(EXTRA_MEMBER_ID))) {
                 Log.e(LOG_TAG, "member ID missing in extra");
-                return isParamInitSucceed;
+                return false;
             } else if (null == (mSession = getSession(intent))) {
                 Log.e(LOG_TAG, "Invalid session");
-                return isParamInitSucceed;
+                return false;
             }
 
             int storeIndex = intent.getIntExtra(EXTRA_STORE_ID, -1);
+            IMXStore store;
 
             if (storeIndex >= 0) {
-                mStore = Matrix.getInstance(this).getTmpStore(storeIndex);
+                store = Matrix.getInstance(this).getTmpStore(storeIndex);
             } else {
-                mStore = mSession.getDataHandler().getStore();
+                store = mSession.getDataHandler().getStore();
             }
 
             mRoomId = intent.getStringExtra(EXTRA_ROOM_ID);
 
-            if ((null != mRoomId) && (null == (mRoom = mStore.getRoom(mRoomId)))) {
+            if ((null != mRoomId) && (null == (mRoom = store.getRoom(mRoomId)))) {
                 Log.e(LOG_TAG, "The room is not found");
             } else {
                 // Everything is OK
@@ -786,11 +998,9 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
      * @return true if member was found in the room , false otherwise
      */
     private boolean checkRoomMemberStatus() {
-        // reset output values, before re processing them
-        mIsMemberJoined = (null == mRoom);
         mRoomMember = null;
 
-        if (null != mRoom){
+        if (null != mRoom) {
             // find out the room member
             Collection<RoomMember> members = mRoom.getMembers();
             for (RoomMember member : members) {
@@ -799,12 +1009,9 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
                     break;
                 }
             }
-
-            if(null != mRoomMember) {
-                mIsMemberJoined = (RoomMember.MEMBERSHIP_JOIN.equals(mRoomMember.membership)) || (RoomMember.MEMBERSHIP_INVITE.equals(mRoomMember.membership));
-            }
         }
-        return mIsMemberJoined;
+
+        return (null == mRoom) || (null != mRoomMember);
     }
 
     /**
@@ -866,10 +1073,28 @@ public class VectorMemberDetailsActivity extends MXCActionBarActivity implements
      */
     private void updateMemberAvatarUi() {
         if (null != mMemberAvatarImageView) {
-
             // use the room member if it exists
             if (null != mRoomMember) {
-                VectorUtils.loadRoomMemberAvatar(this, mSession, mMemberAvatarImageView, mRoomMember);
+                String displayname = mRoomMember.displayname;
+                String avatarUrl =  mRoomMember.avatarUrl;
+
+                // if there is no avatar or displayname , try to find one from the known user
+                // it is always better than the vector avatar or the matrid id.
+                if (TextUtils.isEmpty(avatarUrl) || TextUtils.isEmpty(displayname)) {
+                    User user = mSession.getDataHandler().getStore().getUser(mRoomMember.getUserId());
+
+                    if (null != user) {
+                        if (TextUtils.isEmpty(avatarUrl)) {
+                            avatarUrl = user.avatar_url;
+                        }
+
+                        if (TextUtils.isEmpty(displayname)) {
+                            displayname = user.displayname;
+                        }
+                    }
+                }
+
+                VectorUtils.loadUserAvatar(this, mSession, mMemberAvatarImageView, avatarUrl, mRoomMember.getUserId(), displayname);
             } else {
                 User user = mSession.getDataHandler().getStore().getUser(mMemberId);
 
