@@ -20,7 +20,6 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
-import android.graphics.Color;
 import android.os.Bundle;
 import android.support.v4.app.ActionBarDrawerToggle;
 import android.support.v4.app.DialogFragment;
@@ -53,6 +52,8 @@ import java.util.ArrayList;
  * extends ActionBarActivity to manage the rageshake
  */
 public class MXCActionBarActivity extends ActionBarActivity {
+    private static final String LOG_TAG = "MXCActBarActivity";
+
     public static final String TAG_FRAGMENT_ACCOUNT_SELECTION_DIALOG = "ActionBarActivity.TAG_FRAGMENT_ACCOUNT_SELECTION_DIALOG";
     public static final String EXTRA_MATRIX_ID = "MXCActionBarActivity.EXTRA_MATRIX_ID";
 
@@ -101,8 +102,8 @@ public class MXCActionBarActivity extends ActionBarActivity {
     
     /**
      * Return the used MXSession from an intent.
-     * @param intent
-     * @return the MXsession if it exists.
+     * @param intent the intent
+     * @return the MXSession if it exists.
      */
     protected MXSession getSession(Intent intent) {
         String matrixId = null;
@@ -220,9 +221,14 @@ public class MXCActionBarActivity extends ActionBarActivity {
         }
 
         if (item.getItemId() == android.R.id.home) {
-            // pop the activity to avoid creating a new instance of the parent activity
-            this.onBackPressed();
-            return true;
+            // issue by GA
+            try {
+                // pop the activity to avoid creating a new instance of the parent activity
+                this.onBackPressed();
+                return true;
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "## onOptionsItemSelected : " + e.getMessage());
+            }
         }
         return super.onOptionsItemSelected(item);
     }

@@ -55,6 +55,7 @@ import org.matrix.androidsdk.data.RoomSummary;
 import org.matrix.androidsdk.db.MXMediasCache;
 import org.matrix.androidsdk.rest.callback.ApiCallback;
 import org.matrix.androidsdk.rest.callback.SimpleApiCallback;
+import org.matrix.androidsdk.rest.model.Event;
 import org.matrix.androidsdk.rest.model.MatrixError;
 import org.matrix.androidsdk.rest.model.PowerLevels;
 import org.matrix.androidsdk.rest.model.RoomMember;
@@ -135,7 +136,8 @@ public class CommonActivityUtils {
     // Android M permission request code management
     private static final boolean PERMISSIONS_GRANTED = true;
     private static final boolean PERMISSIONS_DENIED = !PERMISSIONS_GRANTED;
-    private static final int PERMISSION_CAMERA = 0x1;
+    public static final int PERMISSION_BYPASSED = 0x0;
+    public static final int PERMISSION_CAMERA = 0x1;
     private static final int PERMISSION_WRITE_EXTERNAL_STORAGE = 0x1<<1;
     private static final int PERMISSION_RECORD_AUDIO = 0x1<<2;
     private static final int PERMISSION_READ_CONTACTS = 0x1<<3;
@@ -146,6 +148,7 @@ public class CommonActivityUtils {
     public static final int REQUEST_CODE_PERMISSION_MEMBER_DETAILS = PERMISSION_READ_CONTACTS;
     public static final int REQUEST_CODE_PERMISSION_ROOM_DETAILS = PERMISSION_CAMERA;
     public static final int REQUEST_CODE_PERMISSION_HOME_ACTIVITY = PERMISSION_WRITE_EXTERNAL_STORAGE;
+    public static final int REQUEST_CODE_PERMISSION_BY_PASS = PERMISSION_BYPASSED;
 
     public static void logout(Activity activity, MXSession session, Boolean clearCredentials) {
         if (session.isAlive()) {
@@ -502,6 +505,30 @@ public class CommonActivityUtils {
     }
 
     /**
+     * Check if the user power level allows to update the room avatar. This is mainly used to
+     * determine if camera permission must be checked or not.
+     *
+     * @param aRoom the room
+     * @param aSession the session
+     * @return true if the user power level allows to update the avatar, false otherwise.
+     */
+    public static boolean isPowerLevelEnoughForAvatarUpdate(Room aRoom, MXSession aSession) {
+        boolean canUpdateAvatarWithCamera = false;
+        PowerLevels powerLevels;
+
+        if ((null != aRoom) && (null != aSession)) {
+            if (null != (powerLevels = aRoom.getLiveState().getPowerLevels())) {
+                int powerLevel = powerLevels.getUserPowerLevel(aSession.getMyUserId());
+
+                // check the power level against avatar level
+                canUpdateAvatarWithCamera = (powerLevel >= powerLevels.minimumPowerLevelForSendingEventAsStateEvent(Event.EVENT_TYPE_STATE_ROOM_AVATAR));
+            }
+        }
+
+        return canUpdateAvatarWithCamera;
+    }
+
+    /**
      * Check if the permissions provided in the list are granted.
      * This is an asynchronous method if permissions are requested, the final response
      * is provided in onRequestPermissionsResult(). In this case checkPermissions()
@@ -523,6 +550,8 @@ public class CommonActivityUtils {
         if(null == aCallingActivity){
             Log.w(LOG_TAG, "## checkPermissions(): invalid input data");
             isPermissionGranted = false;
+        } else if(REQUEST_CODE_PERMISSION_BY_PASS == aPermissionsToBeGrantedBitMap) {
+            isPermissionGranted = true;
         } else if((REQUEST_CODE_PERMISSION_TAKE_PHOTO!=aPermissionsToBeGrantedBitMap)
                 && (REQUEST_CODE_PERMISSION_AUDIO_IP_CALL!=aPermissionsToBeGrantedBitMap)
                 && (REQUEST_CODE_PERMISSION_VIDEO_IP_CALL!=aPermissionsToBeGrantedBitMap)
@@ -584,11 +613,11 @@ public class CommonActivityUtils {
                     // add the user info text to be displayed to explain why the permission is required by the App
                     for(String permissionAlreadyDenied : permissionListAlreadyDenied) {
                         if (Manifest.permission.CAMERA.equals(permissionAlreadyDenied)) {
-                            explanationMessage += "\n\n" + resource.getString(R.string.permissions_rationale_msg_camera);
+                            explanationMessage += "\n\n" + resource.getString(R.string.permissions_rationale_msg_camera, Matrix.getApplicationName());
                         } else if(Manifest.permission.RECORD_AUDIO.equals(permissionAlreadyDenied)){
-                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_record_audio);
+                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_record_audio, Matrix.getApplicationName());
                         } else if(Manifest.permission.WRITE_EXTERNAL_STORAGE.equals(permissionAlreadyDenied)){
-                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_storage);
+                            explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_storage, Matrix.getApplicationName());
                         } else if(Manifest.permission.READ_CONTACTS.equals(permissionAlreadyDenied)){
                             explanationMessage += "\n\n"+resource.getString(R.string.permissions_rationale_msg_contacts);
                         } else {
@@ -603,7 +632,7 @@ public class CommonActivityUtils {
                 // display the dialog with the info text
                 AlertDialog.Builder permissionsInfoDialog = new AlertDialog.Builder(aCallingActivity);
                 if(null != resource) {
-                    permissionsInfoDialog.setTitle(resource.getString(R.string.permissions_rationale_popup_title));
+                    permissionsInfoDialog.setTitle(resource.getString(R.string.permissions_rationale_popup_title, Matrix.getApplicationName()));
                 }
 
                 permissionsInfoDialog.setMessage(explanationMessage);
@@ -637,10 +666,10 @@ public class CommonActivityUtils {
                         permissionsInfoDialog.setIcon(android.R.drawable.ic_dialog_info);
 
                         if (null != resource) {
-                            permissionsInfoDialog.setTitle(resource.getString(R.string.permissions_rationale_popup_title));
+                            permissionsInfoDialog.setTitle(resource.getString(R.string.permissions_rationale_popup_title, Matrix.getApplicationName()));
                         }
 
-                        permissionsInfoDialog.setMessage(R.string.permissions_msg_contacts_warning_other_androids);
+                        permissionsInfoDialog.setMessage(resource.getString(R.string.permissions_msg_contacts_warning_other_androids, Matrix.getApplicationName()));
 
                         // gives the contacts book access
                         permissionsInfoDialog.setPositiveButton(aCallingActivity.getString(R.string.yes), new DialogInterface.OnClickListener() {
@@ -1442,22 +1471,39 @@ public class CommonActivityUtils {
 
         File dstFile = new File(dstDir, dstFileName);
 
+        // if the file already exists, append a marker
+        if (dstFile.exists()) {
+            String baseFileName = dstFileName;
+            String fileExt = "";
+
+            int lastDotPos = dstFileName.lastIndexOf(".");
+
+            if (lastDotPos > 0) {
+                baseFileName = dstFileName.substring(0, lastDotPos);
+                fileExt = dstFileName.substring(lastDotPos);
+            }
+
+            int counter = 1;
+
+            while(dstFile.exists()) {
+                dstFile = new File(dstDir, baseFileName + "(" + counter + ")" + fileExt);
+                counter ++;
+            }
+        }
+
         // Copy source file to destination
         FileInputStream inputStream = null;
         FileOutputStream outputStream = null;
         try {
-            // create only the
-            if (!dstFile.exists()) {
-                dstFile.createNewFile();
+            dstFile.createNewFile();
 
-                inputStream = new FileInputStream(sourceFile);
-                outputStream = new FileOutputStream(dstFile);
+            inputStream = new FileInputStream(sourceFile);
+            outputStream = new FileOutputStream(dstFile);
 
-                byte[] buffer = new byte[1024 * 10];
-                int len;
-                while ((len = inputStream.read(buffer)) != -1) {
-                    outputStream.write(buffer, 0, len);
-                }
+            byte[] buffer = new byte[1024 * 10];
+            int len;
+            while ((len = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, len);
             }
         } catch (Exception e) {
             dstFile = null;
